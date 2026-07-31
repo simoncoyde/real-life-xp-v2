@@ -7,6 +7,10 @@
    knight equally well.
    ======================================================================= */
 
+/* world units per texture repeat — keeps surface grain a consistent size
+   regardless of how big the box it's wrapped around is */
+const TEX_SCALE = 0.14;
+
 const shade = (c, k) => [
   Math.min(1, Math.max(0, c[0] * k)),
   Math.min(1, Math.max(0, c[1] * k)),
@@ -280,17 +284,6 @@ function buildBossMesh(kind) {
   return new Float32Array(v);
 }
 
-/* Exposed for automated integrity checks — a corrupted vertex buffer renders
-   as torn geometry rather than throwing, so it must be validated numerically. */
-if (typeof window !== "undefined") {
-  window.__RLXP_MESH__ = {
-    buildCharacterMesh,
-    buildChestMesh,
-    buildBossMesh,
-    BOSS_KIND_KEYS,
-    STRIDE_FLOATS: 11,
-  };
-}
 
 
 export { BOSS_KINDS, BOSS_KIND_KEYS, buildBossMesh, shade, addBox, addTaperBox, pushQuad };
