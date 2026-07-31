@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import BossViewer3D from "./BossViewer3D.jsx";
+import Sprite from "./Sprite.jsx";
 import { BOSS_KINDS, BOSS_KIND_KEYS, buildBossMesh } from "./bossMesh.js";
 
 /* =======================================================================
@@ -1215,19 +1215,66 @@ const Audio_ = (function () {
     };
   });
 
+  /* Real recordings, where we have them. Anything not listed here still
+     plays its synthesised version, so the app never has a silent moment
+     while the sound library is being filled in one file at a time. */
+  const SAMPLE_FILES = {
+    chestCreak: "audio/chest-open.mp3",
+  };
+  const buffers = {};
+  let samplesRequested = false;
+
+  function loadSamples() {
+    if (samplesRequested) return;
+    samplesRequested = true;
+    const c = ensure();
+    if (!c) return;
+    Object.keys(SAMPLE_FILES).forEach(function (name) {
+      // resolved against the page so it works wherever the app is published
+      const url = new URL(SAMPLE_FILES[name], document.baseURI).href;
+      fetch(url)
+        .then(function (r) { return r.ok ? r.arrayBuffer() : Promise.reject(r.status); })
+        .then(function (data) {
+          return new Promise(function (res, rej) {
+            // callback form, because older Safari doesn't return a promise here
+            const ret = c.decodeAudioData(data, res, rej);
+            if (ret && ret.then) ret.then(res, rej);
+          });
+        })
+        .then(function (buf) { buffers[name] = buf; })
+        .catch(function () { /* falls back to the synthesised version */ });
+    });
+  }
+
+  function playSample(c, name, t0) {
+    const buf = buffers[name];
+    if (!buf) return false;
+    const src = c.createBufferSource();
+    src.buffer = buf;
+    const g = c.createGain();
+    g.gain.value = 0.9;
+    src.connect(g).connect(master);
+    src.start(t0);
+    return true;
+  }
+
   let enabled = true;
   return {
     setEnabled: function (v) { enabled = !!v; },
-    unlock: unlock,
+    unlock: function () { unlock(); loadSamples(); },
+    loadSamples: loadSamples,
+    hasSample: function (n) { return !!buffers[n]; },
     play: function (name, delay) {
       if (!enabled) return false;
       const c = ensure();
       if (!c) return false;
       const fn = SOUNDS[name];
-      if (!fn) return false;
+      if (!fn && !buffers[name]) return false;
       try {
         if (c.state === "suspended" && c.resume) c.resume();
-        fn(c, c.currentTime + (delay || 0));
+        const at = c.currentTime + (delay || 0);
+        // a real recording wins; otherwise fall through to the synth version
+        if (!playSample(c, name, at)) fn(c, at);
         log.push(name);
         if (log.length > 60) log.shift();
         return true;
@@ -2742,7 +2789,15 @@ function BossPanel({ boss, reducedMotion, lastHit }) {
       </div>
 
       <div className="rlxp-boss-stage">
-        <BossViewer3D kind={boss.kind} defeated={boss.defeated} reducedMotion={reducedMotion} />
+        <div className="rlxp-boss-sprite">
+          <Sprite
+            id="orc"
+            anim={boss.defeated ? "idle" : "idle"}
+            scale={5}
+            playing={!boss.defeated}
+            reducedMotion={reducedMotion}
+          />
+        </div>
         {lastHit != null && (
           <span key={lastHit.id} className="rlxp-boss-hit">-{fmt(lastHit.amount)}</span>
         )}
@@ -4769,11 +4824,10 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
               aria-label="Open character"
               onClick={() => setShowCharacter(true)}
             >
-              <CharacterViewer
-                race={state.character.race}
-                sex={state.character.sex}
-                gear={state.equippedGear || EMPTY_GEAR}
-                height={104}
+              <Sprite
+                id={state.character.spriteId || "human"}
+                anim="idle"
+                scale={3}
                 reducedMotion={reducedMotion}
               />
             </button>
@@ -6637,6 +6691,23 @@ const CSS = `
   box-shadow: 0 2px 6px rgba(0,0,0,0.6);
   pointer-events: none;
 }
+
+/* ---- pixel sprites ----
+   The art is 8x8-ish drawn inside a 32x32 frame, so it must never be
+   smoothed or scaled by fractions or it turns to mush. */
+.rlxp-sprite {
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  -ms-interpolation-mode: nearest-neighbor;
+}
+.rlxp-boss-sprite {
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rlxp-hero-portrait .rlxp-sprite { margin: 0 auto; }
 
 /* ---- weekly boss panel ---- */
 .rlxp-boss-panel {
