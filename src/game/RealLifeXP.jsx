@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import Sprite from "./Sprite.jsx";
-import { BOSS_KINDS, BOSS_KIND_KEYS, buildBossMesh } from "./bossMesh.js";
+import { BOSS_KINDS, BOSS_KIND_KEYS } from "./bossMesh.js";
+import Sprite, {
+  assetUrl,
+  SPRITES, CHARACTER_IDS, characterUnlocked,
+  FLOURISHES, FLOURISH_IDS, flourishOwned, flourishUsable,
+  WEAPONS, WEAPON_IDS, weaponOwned, WeaponSprite,
+  BACKDROPS, BACKDROP_IDS, backdropOwned, Backdrop,
+  EffectSprite,
+} from "./Sprite.jsx";
 
 /* =======================================================================
    REAL-LIFE XP — pure calculation utilities
@@ -382,8 +389,7 @@ function pick(arr) {
 /* Rolls the contents of one chest. Cosmetics can come in one tier above the
    chest's own tier; higher chests guarantee at least one cosmetic if any are
    still unowned, so a rare chest never feels wasted. */
-function rollChestLoot(tier, ownedCosmetics, ownedGear, dailyTarget, forceCosmetic) {
-  const gearOwned = [...(ownedGear || [])];
+function rollChestLoot(tier, ownedCosmetics, dailyTarget, forceCosmetic) {
   const owned = [...ownedCosmetics];
   const loot = [];
   const rolls = CHEST_ROLLS[tier];
@@ -410,29 +416,6 @@ function rollChestLoot(tier, ownedCosmetics, ownedGear, dailyTarget, forceCosmet
     if (c) loot.push(c);
   }
 
-  const tryGear = () => {
-    // Small chance of a fun accessory from any chest; otherwise an armour
-    // piece from this rarity's pool. Only pieces you don't yet own can drop.
-    const accessoryChance = tier === "mythic" ? 0.2 : 0.08;
-    if (Math.random() < accessoryChance) {
-      const pool = GEAR_ITEMS.filter((g) => g.accessory && !gearOwned.includes(g.id));
-      if (pool.length > 0) {
-        const item = pick(pool);
-        gearOwned.push(item.id);
-        return { kind: "gear", itemId: item.id, label: item.label, slot: item.slot, tier };
-      }
-    }
-    const sets = CHEST_GEAR_POOL[tier] || [];
-    const pool = GEAR_ITEMS.filter(
-      (g) => !g.accessory && sets.includes(g.set) && !gearOwned.includes(g.id)
-    );
-    if (pool.length > 0) {
-      const item = pick(pool);
-      gearOwned.push(item.id);
-      return { kind: "gear", itemId: item.id, label: item.label, slot: item.slot, tier };
-    }
-    return null;
-  };
 
   while (loot.length < rolls) {
     const roll = Math.random();
@@ -547,8 +530,11 @@ function questProgress(quest, state) {
    Separate from the quest-scroll system: no scroll needed, always active,
    and completing all three grants an immediate bonus chest + XP.
    ======================================================================= */
+/* Everything here has to be possible with no equipment at all — a task you
+   physically can't do isn't a task, it's just a locked door. Bodyweight,
+   walking, steps and stretching only. Strength XP stays because push-ups
+   earn it. */
 const TASK_TEMPLATES = [
-  { type: "activityType", key: "weighted", label: "Log any Weighted exercise" },
   { type: "activityType", key: "bodyweight", label: "Log any Bodyweight exercise" },
   { type: "activityType", key: "run", label: "Go for a Run" },
   { type: "activityType", key: "walk", label: "Log a Walk" },
@@ -754,8 +740,6 @@ function defaultState() {
     onboarded: false,
     character: null,
     bodyPartXp: {},
-    ownedGear: [],
-    equippedGear: { helmet: null, torso: null, legs: null },
     giftChestGranted: false,
     focus: null,
     lastEncouragementDate: null,
@@ -802,7 +786,6 @@ function processRollover(prevState) {
   if (typeof s.onboarded !== "boolean") s.onboarded = true;
   if (s.focus === undefined) s.focus = null;
   if (s.character === undefined) s.character = null;
-  if (!s.ownedGear) s.ownedGear = [];
   // One-time gift for every player, old and new. The flag is set the moment
   // it's granted (not when opened), so it can never be handed out twice.
   if (!s.giftChestGranted) {
@@ -818,6 +801,14 @@ function processRollover(prevState) {
   if (typeof s.dailyTasksBonusClaimed !== "boolean") s.dailyTasksBonusClaimed = false;
   if (typeof s.dailyTaskStreak !== "number") s.dailyTaskStreak = 0;
   if (typeof s.coins !== "number") s.coins = 0;
+  if (!Array.isArray(s.ownedCharacters)) s.ownedCharacters = ["human"];
+  if (!Array.isArray(s.ownedFlourishes)) s.ownedFlourishes = [];
+  if (!Array.isArray(s.ownedWeapons)) s.ownedWeapons = [];
+  if (!Array.isArray(s.ownedBackdrops)) s.ownedBackdrops = [];
+  if (!s.equippedBackdrop) s.equippedBackdrop = "none";
+  if (s.equippedWeapon === undefined) s.equippedWeapon = null;
+  if (s.equippedFlourish === undefined) s.equippedFlourish = null;
+  if (s.character && !s.character.spriteId) s.character.spriteId = "human";
   /* Anyone already playing when gold arrived is paid for the progress they
      already made, so the shop isn't empty for people who've earned the most. */
   if (!s.coinsBackdated) {
@@ -835,18 +826,6 @@ function processRollover(prevState) {
     delete s.weeklyBoss.icon;
   }
   if (typeof s.bossDefeatStreak !== "number") s.bossDefeatStreak = 0;
-  if (!s.equippedGear) s.equippedGear = { helmet: null, torso: null, legs: null };
-  // Defensive: never leave unowned gear equipped
-  ["helmet", "torso", "legs"].forEach((sl) => {
-    if (s.equippedGear[sl] && !s.ownedGear.includes(s.equippedGear[sl])) s.equippedGear[sl] = null;
-  });
-  if (!s.bodyPartXp) {
-    const bp = {};
-    (s.history || []).forEach((h) => {
-      if (h.bodyPart && h.xp > 0) bp[h.bodyPart] = (bp[h.bodyPart] || 0) + h.xp;
-    });
-    s.bodyPartXp = bp;
-  }
   if (s.lastEncouragementDate === undefined) s.lastEncouragementDate = null;
   if (!s.exerciseBodyParts) s.exerciseBodyParts = {};
   // Cosmetics rework: the old colour-changing "barTheme" became "barFrame"
@@ -991,6 +970,7 @@ const GLYPH_PATHS = {
   bag: "M8 5V4a4 4 0 0 1 8 0v1h1.6c1 0 1.8.7 1.9 1.7l1.1 11c.1 1.2-.8 2.3-2 2.3H5.4c-1.2 0-2.1-1.1-2-2.3l1.1-11C4.6 5.7 5.4 5 6.4 5H8zm2 0h4V4a2 2 0 0 0-4 0v1zM7 9.5h10V11H7V9.5z",
   shield: "M12 2l8 3v6.2c0 5-3.4 9.4-8 10.8-4.6-1.4-8-5.8-8-10.8V5l8-3zm0 3.4L6 7.6v3.6c0 3.5 2.4 6.7 6 7.9 3.6-1.2 6-4.4 6-7.9V7.6l-6-2.2z",
   scroll: "M5 3h11a3 3 0 0 1 3 3v1h-2V6a1 1 0 0 0-2 0v12a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-1h2v1a1 1 0 0 0 2 0V6a3 3 0 0 1 3-3H5zm3 4h8v1.8H8V7zm0 3.6h8v1.8H8v-1.8zm0 3.6h5.5V16H8v-1.8z",
+  shop: "M3.4 3h17.2l1.6 4.6c.3 1-.2 2-1.1 2.3v9.5c0 .9-.7 1.6-1.6 1.6H4.5c-.9 0-1.6-.7-1.6-1.6V9.9C2 9.6 1.5 8.6 1.8 7.6L3.4 3zm1.5 2.2L3.9 8h4.3l.5-2.8H4.9zm6 0L10.4 8h3.2l-.5-2.8h-1.2zm3.5 0L15.9 8h4.2l-1-2.8h-3.7zM5.1 10.6v9.2h4.3v-5.4h5.2v5.4h4.3v-9.2a3.4 3.4 0 0 1-2.6-1 3.4 3.4 0 0 1-2.6 1 3.4 3.4 0 0 1-2.6-1 3.4 3.4 0 0 1-2.6 1 3.4 3.4 0 0 1-2.6-1H5.1z",
   gear: "M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2zm0 5.4a1.8 1.8 0 1 1 0-3.6 1.8 1.8 0 0 1 0 3.6zM20.4 12c0-.5 0-1-.1-1.5l2-1.5-2-3.4-2.4 1a8 8 0 0 0-2.6-1.5L15 2.4H9l-.3 2.7a8 8 0 0 0-2.6 1.5l-2.4-1-2 3.4 2 1.5a9 9 0 0 0 0 3l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 2.6 1.5l.3 2.7h6l.3-2.7a8 8 0 0 0 2.6-1.5l2.4 1 2-3.4-2-1.5c.1-.5.1-1 .1-1.5z",
   token: "M12 2l2.6 5.4 5.9.8-4.3 4.1 1.1 5.9L12 15.4 6.7 18.2l1.1-5.9L3.5 8.2l5.9-.8L12 2z",
   leaf: "M20 3c-9 0-14 4.2-14 10 0 2 .6 3.7 1.6 5L4 21.4 5.4 22.8 9 19.2c1.3.8 2.8 1.2 4.5 1.2C18 20.4 20 15 20 3zm-8.6 13.6c-.6 0-1.2-.1-1.7-.3 2.4-3.7 5.4-6.2 8.3-7.6-1.6 4.8-3.4 7.9-6.6 7.9z",
@@ -1230,8 +1210,10 @@ const Audio_ = (function () {
     const c = ensure();
     if (!c) return;
     Object.keys(SAMPLE_FILES).forEach(function (name) {
-      // resolved against the page so it works wherever the app is published
-      const url = new URL(SAMPLE_FILES[name], document.baseURI).href;
+      // inlined data in the preview, a real file once published
+      const path = SAMPLE_FILES[name];
+      const inlined = typeof window !== "undefined" && window.__ASSETS__ && window.__ASSETS__[path];
+      const url = inlined || new URL(path, document.baseURI).href;
       fetch(url)
         .then(function (r) { return r.ok ? r.arrayBuffer() : Promise.reject(r.status); })
         .then(function (data) {
@@ -1290,18 +1272,42 @@ const Audio_ = (function () {
 
 if (typeof window !== "undefined") window.__RLXP_AUDIO__ = Audio_;
 
+/* Real Minifantasy icons, addressed by their position in the packed sheet as
+   [column, row]. Anything without a good match keeps its hand-drawn SVG, so
+   nothing silently turns into the wrong picture. */
+/* Empty for now — the pack's own 8x8 symbols didn't suit, so the hand-drawn
+   set is used instead. Adding an entry here ([column, row] in ui/icons.png)
+   overrides any single icon, so swapping in a better set later is trivial. */
+const ICON_POS = {};
+
+const ICON_SHEET_COLS = 10;
+const ICON_SHEET_ROWS = 12;
+
 function Glyph({ name, size = 20, className = "" }) {
+  const pos = ICON_POS[name];
+  if (pos) {
+    // whole-number scaling only, or 8px art turns to mush
+    const scale = Math.max(1, Math.round(size / 8));
+    const px = 8 * scale;
+    return (
+      <span
+        className={`rlxp-glyph rlxp-icon ${className}`}
+        style={{
+          width: px,
+          height: px,
+          backgroundImage: `url(${assetUrl("ui/icons.png")})`,
+          backgroundPosition: `-${pos[0] * px}px -${pos[1] * px}px`,
+          backgroundSize: `${ICON_SHEET_COLS * px}px ${ICON_SHEET_ROWS * px}px`,
+        }}
+        aria-hidden="true"
+      />
+    );
+  }
   const d = GLYPH_PATHS[name];
   if (!d) return null;
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width={size}
-      height={size}
-      className={`rlxp-glyph ${className}`}
-      aria-hidden="true"
-      focusable="false"
-    >
+    <svg viewBox="0 0 24 24" width={size} height={size}
+      className={`rlxp-glyph ${className}`} aria-hidden="true" focusable="false">
       <path d={d} fill="currentColor" />
     </svg>
   );
@@ -1387,54 +1393,88 @@ function XPBar({ totalXp, level, riskXp, frameTier }) {
   );
 }
 
-function DecayRisk({ riskXp, targetMet, tokenActive, easyMode }) {
-  if (easyMode) {
-    return (
-      <div className="rlxp-decay-box rlxp-decay-easy">
-        <span className="rlxp-token-icon"><Glyph name="leaf" size={16} /></span>
-        {targetMet ? "Daily requirement complete" : "Easy mode — no penalty for missing a day"}
-      </div>
-    );
-  }
-  if (tokenActive) {
-    return (
-      <div className="rlxp-decay-box rlxp-decay-token">
-        <span className="rlxp-token-icon"><Glyph name="token" size={16} /></span> Rest token active — no penalty today
-      </div>
-    );
-  }
-  if (targetMet) {
-    return (
-      <div className="rlxp-decay-box rlxp-decay-safe">
-        <span className="rlxp-decay-check"><Glyph name="check" size={16} /></span> Daily requirement complete
-      </div>
-    );
-  }
-  return (
-    <div className="rlxp-decay-box">
-      <div className="rlxp-decay-line1">
-        Failure to earn today's XP will result in a penalty.
-      </div>
-      <div className="rlxp-decay-line2">
-        You will lose <strong>{fmt(riskXp)} XP</strong>.
-      </div>
-    </div>
-  );
+/* =======================================================================
+   THE DAILY WARNING
+
+   Solo Levelling's daily quest is a threat with a clock on it, and that's
+   what makes it work. This merges the old progress bar and penalty notice
+   into one panel that escalates as the day runs out:
+
+     calm  -> under half the day gone
+     urgent-> past mid-afternoon, still short
+     critical -> under two hours, still short
+     safe  -> requirement met, the whole thing goes green and quiet
+
+   The escape hatches (rest tokens, easy mode) stay visible in every state.
+   The point is to make missing a day feel real, not to make someone anxious.
+   ======================================================================= */
+function msUntilMidnight() {
+  const now = new Date();
+  const end = new Date(now);
+  end.setHours(24, 0, 0, 0);
+  return end - now;
 }
 
-function DailyProgress({ earned, target }) {
+function formatCountdown(ms) {
+  if (ms <= 0) return "0m";
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  if (h >= 1) return `${h}h ${m}m`;
+  const sec = Math.floor((ms % 60000) / 1000);
+  return `${m}m ${String(sec).padStart(2, "0")}s`;
+}
+
+function DailyWarning({ earned, target, riskXp, targetMet, tokenActive, easyMode, restTokens, onUseToken }) {
+  const [left, setLeft] = useState(msUntilMidnight);
+  useEffect(() => {
+    const t = setInterval(() => setLeft(msUntilMidnight()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   const pct = Math.min((earned / Math.max(target, 1)) * 100, 100);
+  const hoursLeft = left / 3600000;
+  const safe = targetMet || tokenActive || easyMode;
+  const level = safe ? "safe" : hoursLeft <= 2 ? "critical" : hoursLeft <= 9 ? "urgent" : "calm";
+
+  const headline = targetMet
+    ? "Daily requirement complete"
+    : tokenActive
+    ? "Rest token active — no penalty today"
+    : easyMode
+    ? "Easy mode — no penalty for missing a day"
+    : level === "critical"
+    ? "Time is nearly up"
+    : "Daily requirement not met";
+
   return (
-    <div className="rlxp-daily">
-      <div className="rlxp-daily-row">
-        <span>Today's requirement</span>
-        <span>
+    <div className={`rlxp-warning rlxp-warning-${level}`}>
+      <div className="rlxp-warning-head">
+        <span className="rlxp-warning-title">
+          {safe ? <Glyph name="check" size={15} /> : <Glyph name="warning" size={15} />}
+          {headline}
+        </span>
+        {!safe && <span className="rlxp-warning-clock">{formatCountdown(left)}</span>}
+      </div>
+
+      <div className="rlxp-warning-track">
+        <div className="rlxp-warning-fill" style={{ width: `${pct}%` }} />
+        <span className="rlxp-warning-amount">
           {fmt(earned)} / {fmt(target)} XP
         </span>
       </div>
-      <div className="rlxp-daily-track">
-        <div className="rlxp-daily-fill" style={{ width: `${pct}%` }} />
-      </div>
+
+      {!safe && (
+        <div className="rlxp-warning-foot">
+          <span className="rlxp-warning-penalty">
+            Penalty if unmet: <strong>−{fmt(riskXp)} XP</strong>
+          </span>
+          {restTokens > 0 && (
+            <button className="rlxp-warning-token" onClick={onUseToken}>
+              <Glyph name="token" size={13} /> Use a rest token
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1444,850 +1484,8 @@ function DailyProgress({ earned, target }) {
    Low-poly boxy build in the spirit of old-school MMO models.
    ======================================================================= */
 
-const RACES = {
-  human: {
-    label: "Human",
-    skin: [0.85, 0.63, 0.42], hair: [0.36, 0.23, 0.12],
-    tunic: [0.42, 0.46, 0.55], trim: [0.60, 0.48, 0.24],
-    legs: [0.36, 0.27, 0.18], boots: [0.22, 0.16, 0.10],
-    eyes: [0.16, 0.12, 0.09],
-  },
-  orc: {
-    label: "Orc",
-    skin: [0.42, 0.60, 0.28], hair: [0.12, 0.10, 0.08],
-    tunic: [0.42, 0.32, 0.24], trim: [0.62, 0.44, 0.18],
-    legs: [0.30, 0.24, 0.16], boots: [0.18, 0.13, 0.09],
-    eyes: [0.75, 0.45, 0.10],
-    bulk: 1.18, tusks: true,
-  },
-  nightelf: {
-    label: "Night Elf",
-    skin: [0.56, 0.49, 0.79], hair: [0.14, 0.55, 0.50],
-    tunic: [0.27, 0.29, 0.46], trim: [0.55, 0.70, 0.80],
-    legs: [0.24, 0.22, 0.38], boots: [0.15, 0.13, 0.22],
-    eyes: [0.45, 0.95, 0.88],
-    bulk: 0.92, ears: true,
-  },
-};
-const RACE_KEYS = ["human", "orc", "nightelf"];
-const SEXES = [
-  { key: "male", label: "Male" },
-  { key: "female", label: "Female" },
-];
 
 /* --- armour sets: the classic metal ladder, gated by character level --- */
-const ARMOUR_SETS = [
-  { key: "bronze",     label: "Bronze",     level: 1,  main: [0.55, 0.33, 0.16], trim: [0.74, 0.48, 0.22] },
-  { key: "iron",       label: "Iron",       level: 5,  main: [0.34, 0.34, 0.36], trim: [0.50, 0.50, 0.52] },
-  { key: "steel",      label: "Steel",      level: 10, main: [0.60, 0.62, 0.66], trim: [0.80, 0.82, 0.86] },
-  { key: "black",      label: "Black",      level: 20, main: [0.12, 0.12, 0.14], trim: [0.32, 0.32, 0.36] },
-  { key: "mithril",    label: "Mithril",    level: 30, main: [0.25, 0.31, 0.55], trim: [0.44, 0.54, 0.80] },
-  { key: "adamantite", label: "Adamantite", level: 40, main: [0.20, 0.40, 0.28], trim: [0.36, 0.62, 0.44] },
-  { key: "runite",     label: "Runite",     level: 55, main: [0.19, 0.41, 0.55], trim: [0.36, 0.64, 0.80] },
-  { key: "dragon",     label: "Dragon",     level: 70, main: [0.55, 0.11, 0.09], trim: [0.82, 0.26, 0.14] },
-];
-const ARMOUR_BY_KEY = {};
-ARMOUR_SETS.forEach((a) => (ARMOUR_BY_KEY[a.key] = a));
-
-const GEAR_SLOT_DEFS = [
-  { key: "helmet", label: "Helmet", piece: "Full Helm", glyph: "helm" },
-  { key: "torso", label: "Torso", piece: "Platebody", glyph: "platebody" },
-  { key: "legs", label: "Legs", piece: "Platelegs", glyph: "platelegs" },
-];
-
-const GEAR_ITEMS = [];
-ARMOUR_SETS.forEach((set) => {
-  GEAR_SLOT_DEFS.forEach((sl) => {
-    GEAR_ITEMS.push({
-      id: `gear-${sl.key}-${set.key}`,
-      slot: sl.key,
-      set: set.key,
-      label: `${set.label} ${sl.piece}`,
-      levelReq: set.level,
-    });
-  });
-});
-/* Accessories: fun items, no level requirement, equip any time */
-GEAR_ITEMS.push({
-  id: "gear-helmet-kittyears",
-  slot: "helmet",
-  set: null,
-  label: "Kitty Kat Ears",
-  levelReq: 0,
-  accessory: true,
-});
-const GEAR_BY_ID = {};
-GEAR_ITEMS.forEach((g) => (GEAR_BY_ID[g.id] = g));
-
-/* Which armour sets each chest rarity can drop */
-const CHEST_GEAR_POOL = {
-  common: ["bronze", "iron"],
-  rare: ["steel", "black"],
-  epic: ["mithril", "adamantite"],
-  legendary: ["runite", "dragon"],
-  mythic: ["runite", "dragon"],
-};
-
-function gearEquippable(item, state) {
-  if (!item) return false;
-  if (item.accessory || !item.levelReq) return true;
-  return (state.highestLevelEver || 1) >= item.levelReq;
-}
-
-/* --- tiny column-major matrix helpers --- */
-function m4perspective(fovy, aspect, near, far) {
-  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
-  return new Float32Array([
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0,
-  ]);
-}
-function m4mul(a, b) {
-  const o = new Float32Array(16);
-  for (let c = 0; c < 4; c++)
-    for (let r = 0; r < 4; r++) {
-      let sum = 0;
-      for (let k = 0; k < 4; k++) sum += a[k * 4 + r] * b[c * 4 + k];
-      o[c * 4 + r] = sum;
-    }
-  return o;
-}
-function m4rotY(t) {
-  const c = Math.cos(t), sn = Math.sin(t);
-  return new Float32Array([c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, 0, 0, 0, 1]);
-}
-function m4rotX(t) {
-  const c = Math.cos(t), sn = Math.sin(t);
-  return new Float32Array([1, 0, 0, 0, 0, c, sn, 0, 0, -sn, c, 0, 0, 0, 0, 1]);
-}
-function m4trans(x, y, z) {
-  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]);
-}
-
-/* Push one axis-aligned box: 36 verts of [pos, normal, colour] */
-const TEX_SCALE = 0.14; // world units per texture repeat — keeps the grain a consistent size regardless of box dimensions
-
-/* Shared quad emitter: computes the face normal from the winding and emits
-   two triangles of 11-float vertices [pos, normal, colour, uv]. */
-function pushQuad(out, a, b, c, d, col) {
-  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-  const v = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
-  let nx = u[1] * v[2] - u[2] * v[1];
-  let ny = u[2] * v[0] - u[0] * v[2];
-  let nz = u[0] * v[1] - u[1] * v[0];
-  const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-  nx /= len; ny /= len; nz /= len;
-  const uw = Math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]) / TEX_SCALE;
-  const vh = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) / TEX_SCALE;
-  const quad = [a, b, c, d];
-  const uv = [[0, 0], [uw, 0], [uw, vh], [0, vh]];
-  for (const tri of [[0, 1, 2], [0, 2, 3]]) {
-    for (const i of tri) {
-      const p = quad[i], t = uv[i];
-      out.push(p[0], p[1], p[2], nx, ny, nz, col[0], col[1], col[2], t[0], t[1]);
-    }
-  }
-}
-
-function addBox(out, cx, cy, cz, w, h, d, col) {
-  const x0 = cx - w / 2, x1 = cx + w / 2;
-  const y0 = cy - h / 2, y1 = cy + h / 2;
-  const z0 = cz - d / 2, z1 = cz + d / 2;
-  pushQuad(out, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], col); // front
-  pushQuad(out, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], col); // back
-  pushQuad(out, [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], col); // right
-  pushQuad(out, [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], col); // left
-  pushQuad(out, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], col); // top
-  pushQuad(out, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], col); // bottom
-}
-
-/* Tapered box (frustum): different width/depth at bottom vs top. This is the
-   primitive that makes forms read as classic low-poly MMO art — flared
-   skirts, trapezoid torsos, limbs that thin toward the joint, narrow chins —
-   instead of stacks of straight crates. */
-function addTaperBox(out, cx, yBottom, cz, wBot, dBot, wTop, dTop, h, col) {
-  const y0 = yBottom, y1 = yBottom + h;
-  const xb0 = cx - wBot / 2, xb1 = cx + wBot / 2;
-  const zb0 = cz - dBot / 2, zb1 = cz + dBot / 2;
-  const xt0 = cx - wTop / 2, xt1 = cx + wTop / 2;
-  const zt0 = cz - dTop / 2, zt1 = cz + dTop / 2;
-  pushQuad(out, [xb0, y0, zb1], [xb1, y0, zb1], [xt1, y1, zt1], [xt0, y1, zt1], col); // front
-  pushQuad(out, [xb1, y0, zb0], [xb0, y0, zb0], [xt0, y1, zt0], [xt1, y1, zt0], col); // back
-  pushQuad(out, [xb1, y0, zb1], [xb1, y0, zb0], [xt1, y1, zt0], [xt1, y1, zt1], col); // right
-  pushQuad(out, [xb0, y0, zb0], [xb0, y0, zb1], [xt0, y1, zt1], [xt0, y1, zt0], col); // left
-  pushQuad(out, [xt0, y1, zt1], [xt1, y1, zt1], [xt1, y1, zt0], [xt0, y1, zt0], col); // top
-  pushQuad(out, [xb0, y0, zb0], [xb1, y0, zb0], [xb1, y0, zb1], [xb0, y0, zb1], col); // bottom
-}
-/* Brighten/darken a colour. Clamped: values above 1.0 would be silently
-   clipped by the GPU, flattening exactly the vivid materials (elf eyes,
-   dragon trim) that are meant to stand out most. */
-const shade = (c, k) => [
-  Math.min(1, Math.max(0, c[0] * k)),
-  Math.min(1, Math.max(0, c[1] * k)),
-  Math.min(1, Math.max(0, c[2] * k)),
-];
-
-function buildCharacterMesh(raceKey, sex, gear) {
-  const r = RACES[raceKey] || RACES.human;
-  gear = gear || {};
-  const male = sex !== "female";
-  const b = r.bulk || 1;
-  const shoulderW = (male ? 0.64 : 0.50) * b;
-  const waistW = (male ? 0.40 : 0.30) * b;
-  const hipW = (male ? 0.42 : 0.50) * b;
-  const v = [];
-
-  const helm = gear.helmet ? GEAR_BY_ID[gear.helmet] : null;
-  const torsoSet = gear.torso ? ARMOUR_BY_KEY[(GEAR_BY_ID[gear.torso] || {}).set] : null;
-  const legsSet = gear.legs ? ARMOUR_BY_KEY[(GEAR_BY_ID[gear.legs] || {}).set] : null;
-  const helmSet = helm && !helm.accessory ? ARMOUR_BY_KEY[helm.set] : null;
-  const kitty = helm && helm.id === "gear-helmet-kittyears";
-
-  const torsoMain = torsoSet ? torsoSet.main : r.tunic;
-  const torsoTrim = torsoSet ? torsoSet.trim : r.trim;
-  const legMain = legsSet ? legsSet.main : r.legs;
-  const legTrim = legsSet ? legsSet.trim : shade(r.legs, 1.25);
-
-  /* Women wear a long flared skirt unless platelegs are equipped — the flare
-     is the single strongest "this is a woman" silhouette cue in old low-poly
-     art, far more than proportions alone. */
-  const skirt = !male && !legsSet;
-  const legX = hipW * 0.27;
-
-  /* ---- boots ---- */
-  [-legX, legX].forEach((x) => {
-    addTaperBox(v, x, 0, 0.03, 0.17 * b, 0.28, 0.13 * b, 0.19, 0.11, r.boots);
-    addBox(v, x, 0.045, 0.15, 0.13 * b, 0.07, 0.06, shade(r.boots, 1.35)); // toe cap
-  });
-
-  if (skirt) {
-    /* flared skirt: hip width at waist, sweeping wide at the ankle */
-    addTaperBox(v, 0, 0.10, 0, hipW * 1.75, 0.32, hipW * 0.92, 0.19, 0.86, legMain);
-    addBox(v, 0, 0.985, 0, hipW * 0.96, 0.055, 0.215, torsoTrim); // waistband
-  } else {
-    [-legX, legX].forEach((x) => {
-      addTaperBox(v, x, 0.11, 0, 0.10 * b, 0.11, 0.135 * b, 0.145, 0.35, legMain); // lower leg (ankle→knee)
-      addBox(v, x, 0.485, 0.02, 0.14 * b, 0.09, 0.15, legTrim);                     // knee
-      addTaperBox(v, x, 0.46, 0, 0.135 * b, 0.145, 0.165 * b, 0.175, 0.38, legMain); // upper leg (knee→thigh)
-    });
-    addTaperBox(v, 0, 0.84, 0, hipW, 0.20, hipW * 0.92, 0.20, 0.12, legMain);       // hips
-    addBox(v, 0, 0.975, 0, hipW * 0.98, 0.05, 0.225, torsoTrim);                    // belt
-    addBox(v, 0, 0.975, 0.115, 0.07, 0.055, 0.02, shade(torsoTrim, 1.3));           // buckle
-  }
-
-  /* ---- torso: trapezoid, waist → shoulders ---- */
-  addTaperBox(v, 0, 0.96, 0, waistW, 0.21, shoulderW, 0.21, 0.41, torsoMain);
-  addBox(v, 0, 1.18, 0.108, 0.05, 0.30, 0.02, torsoTrim);                           // centre ridge
-  if (!male) addBox(v, 0, 1.245, 0.117, 0.27 * b, 0.10, 0.045, torsoMain);          // chest
-  if (torsoSet) {
-    addBox(v, 0, 1.335, 0.112, shoulderW * 0.68, 0.055, 0.02, torsoTrim);           // collar plate
-    addBox(v, 0, 1.06, 0.108, waistW * 1.06, 0.04, 0.02, shade(torsoMain, 0.8));    // ab line
-  }
-
-  /* ---- arms ---- */
-  [-1, 1].forEach((sx) => {
-    const ax = sx * (shoulderW / 2 + 0.035);
-    addTaperBox(v, ax, 1.315, 0, 0.17, 0.20, 0.10, 0.15, 0.10, torsoTrim);          // angled pauldron
-    if (!male && !torsoSet) {
-      addTaperBox(v, ax, 1.20, 0, 0.10 * b, 0.12, 0.155 * b, 0.165, 0.145, torsoMain); // puffed sleeve
-      addTaperBox(v, ax, 0.90, 0.01, 0.075 * b, 0.085, 0.095 * b, 0.10, 0.30, r.skin); // slim arm
-    } else {
-      addTaperBox(v, ax, 1.075, 0, 0.095 * b, 0.115, 0.125 * b, 0.135, 0.27, torsoMain); // upper arm
-      addTaperBox(v, ax, 0.865, 0.01, 0.082 * b, 0.095, 0.10 * b, 0.115, 0.21, r.skin);  // forearm
-    }
-    addBox(v, ax, 0.995, 0.01, 0.115 * b, 0.055, 0.13, torsoSet ? torsoTrim : shade(r.boots, 1.3)); // bracer
-    addBox(v, ax, 0.795, 0.01, 0.085, 0.10, 0.105, r.skin);                          // hand
-  });
-
-  /* ---- head: tapered — narrow chin, wider crown ---- */
-  addTaperBox(v, 0, 1.365, 0, 0.125, 0.125, 0.105, 0.105, 0.075, r.skin);            // neck
-  addTaperBox(v, 0, 1.44, 0, 0.185, 0.26, 0.275, 0.26, 0.28, r.skin);                // head
-  [-1, 1].forEach((sx) => {
-    addBox(v, sx * 0.064, 1.63, 0.132, 0.05, 0.048, 0.012, [0.97, 0.96, 0.94]);      // eye white
-    addBox(v, sx * 0.064, 1.63, 0.14, 0.025, 0.036, 0.012, r.eyes);                  // iris
-    addBox(v, sx * 0.066, 1.678, 0.133, 0.058, 0.017, 0.012, r.hair);                // brow
-  });
-  addTaperBox(v, 0, 1.535, 0.133, 0.055, 0.035, 0.03, 0.02, 0.075, shade(r.skin, 0.9)); // nose (tapered wedge)
-  addBox(v, 0, 1.502, 0.132, 0.085, 0.015, 0.012, shade(r.skin, 0.65));              // mouth
-  if (!r.ears) [-1, 1].forEach((sx) => addBox(v, sx * 0.132, 1.585, 0, 0.03, 0.06, 0.05, r.skin));
-  if (r.ears) [-1, 1].forEach((sx) => addTaperBox(v, sx * 0.185, 1.625, 0, 0.13, 0.045, 0.05, 0.03, 0.045, r.skin)); // elf ears taper outward
-  if (r.tusks) [-1, 1].forEach((sx) => addTaperBox(v, sx * 0.052, 1.475, 0.135, 0.032, 0.032, 0.018, 0.018, 0.08, [0.92, 0.90, 0.80]));
-
-  /* ---- hair (hidden under an armour helm) ---- */
-  if (!helmSet) {
-    addTaperBox(v, 0, 1.715, -0.005, 0.29, 0.285, 0.24, 0.235, 0.075, r.hair);       // tapered cap
-    addBox(v, 0, 1.70, 0.13, 0.275, 0.05, 0.03, r.hair);                              // fringe
-    const hairLen = male ? 0.17 : 0.50;
-    addTaperBox(v, 0, 1.67 - hairLen, -0.15, male ? 0.24 : 0.19, 0.055, 0.27, 0.06, hairLen + 0.09, r.hair); // back hair tapers to a point downward
-    if (!male) [-1, 1].forEach((sx) => addTaperBox(v, sx * 0.15, 1.30, -0.03, 0.035, 0.13, 0.05, 0.165, 0.33, r.hair)); // side strands
-  }
-
-  /* ---- helmet gear ---- */
-  if (helmSet) {
-    const m = helmSet.main, t = helmSet.trim;
-    addTaperBox(v, 0, 1.715, 0, 0.315, 0.315, 0.22, 0.22, 0.125, m);                 // domed crown
-    addBox(v, 0, 1.605, -0.15, 0.315, 0.235, 0.055, m);                              // back
-    [-1, 1].forEach((sx) => addBox(v, sx * 0.152, 1.605, 0, 0.055, 0.235, 0.295, m)); // cheeks
-    addBox(v, 0, 1.688, 0.143, 0.315, 0.05, 0.02, t);                                // brow band
-    addBox(v, 0, 1.585, 0.147, 0.032, 0.14, 0.02, t);                                // nose guard
-  }
-  if (kitty) {
-    const pink = [1.0, 0.55, 0.75], inner = [1.0, 0.78, 0.86];
-    addBox(v, 0, 1.775, 0, 0.30, 0.028, 0.30, pink);                                 // headband
-    [-1, 1].forEach((sx) => {
-      const ex = sx * 0.095;
-      addTaperBox(v, ex, 1.79, 0, 0.085, 0.04, 0.012, 0.02, 0.115, pink);            // triangular ear
-      addBox(v, ex, 1.815, 0.02, 0.038, 0.045, 0.005, inner);                        // inner ear
-    });
-  }
-
-  for (let i = 0; i < v.length; i += 11) v[i + 1] -= 0.93;                           // centre vertically (11 floats/vertex)
-  return new Float32Array(v);
-}
-
-const CHAR_VS = `
-attribute vec3 aPos; attribute vec3 aNormal; attribute vec3 aColor; attribute vec2 aUV;
-uniform mat4 uProj; uniform mat4 uModel;
-varying vec3 vColor; varying vec3 vNormal; varying vec2 vUV;
-void main() {
-  gl_Position = uProj * uModel * vec4(aPos, 1.0);
-  vNormal = mat3(uModel) * aNormal;
-  vColor = aColor;
-  vUV = aUV;
-}`;
-const CHAR_FS = `
-precision mediump float;
-varying vec3 vColor; varying vec3 vNormal; varying vec2 vUV;
-uniform sampler2D uTex;
-void main() {
-  vec3 n = normalize(vNormal);
-  float key  = max(dot(n, normalize(vec3(0.45, 0.8, 0.55))), 0.0);
-  float fill = max(dot(n, normalize(vec3(-0.5, 0.25, -0.6))), 0.0);
-  vec3 lit = vColor * (0.42 + 0.52 * key + 0.16 * fill);
-  vec3 grain = texture2D(uTex, vUV).rgb;
-  vec3 textured = lit * mix(vec3(1.0), grain * 1.25, 0.3);
-  gl_FragColor = vec4(textured, 1.0);
-}`;
-
-/* Small hand-painted-style detail texture, generated in-browser (no external
-   assets). Nearest-neighbour filtering keeps it chunky and low-fi rather than
-   smoothed, closer to how old low-resolution game textures actually read. */
-/* Raw pixel upload — no canvas round-trip. Canvas-to-texture upload has
-   known cross-browser colour/alpha handling differences (notably Safari),
-   so generating the bytes directly sidesteps that entire category of risk. */
-function createDetailTexture(gl) {
-  const size = 32;
-  const data = new Uint8Array(size * size * 3);
-  let i = 0;
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const weave = (x + y) % 4 < 2 ? 6 : -6;
-      const grain = Math.floor(Math.random() * 26) - 13;
-      const v = Math.max(0, Math.min(255, 168 + weave + grain));
-      data[i++] = v;
-      data[i++] = v;
-      data[i++] = v;
-    }
-  }
-  const tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, size, size, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  return tex;
-}
-
-/* Flat, untextured fallback shader — used only if the textured shader fails
-   to compile or link on a given device. Renders solid banded lighting with
-   no grain, so the model still shows up rather than disappearing. */
-const CHAR_VS_BASIC = `
-attribute vec3 aPos; attribute vec3 aNormal; attribute vec3 aColor;
-uniform mat4 uProj; uniform mat4 uModel;
-varying vec3 vColor; varying vec3 vNormal;
-void main() {
-  gl_Position = uProj * uModel * vec4(aPos, 1.0);
-  vNormal = mat3(uModel) * aNormal;
-  vColor = aColor;
-}`;
-const CHAR_FS_BASIC = `
-precision mediump float;
-varying vec3 vColor; varying vec3 vNormal;
-void main() {
-  vec3 n = normalize(vNormal);
-  float diff = max(dot(n, normalize(vec3(0.5, 0.8, 0.6))), 0.0);
-  gl_FragColor = vec4(vColor * (0.55 + 0.45 * diff), 1.0);
-}`;
-
-/* Compiles a program and checks every step. Returns null (never throws) so
-   the caller can fall back instead of leaving a blank, unexplained canvas —
-   which is exactly what silently swallowing a shader error used to produce. */
-function compileProgram(gl, vsSrc, fsSrc) {
-  function compile(type, src) {
-    const sh = gl.createShader(type);
-    gl.shaderSource(sh, src);
-    gl.compileShader(sh);
-    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      console.warn("RLXP shader compile error:", gl.getShaderInfoLog(sh));
-      return null;
-    }
-    return sh;
-  }
-  const vs = compile(gl.VERTEX_SHADER, vsSrc);
-  const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
-  if (!vs || !fs) return null;
-  const prog = gl.createProgram();
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    console.warn("RLXP program link error:", gl.getProgramInfoLog(prog));
-    return null;
-  }
-  return prog;
-}
-
-/* Tries the textured shader first; falls back to the plain one if the
-   device rejects it. Returns { prog, textured } so the caller knows which
-   attributes/uniforms are actually available. */
-function compileWithFallback(gl) {
-  const prog = compileProgram(gl, CHAR_VS, CHAR_FS);
-  if (prog) return { prog, textured: true };
-  const fallback = compileProgram(gl, CHAR_VS_BASIC, CHAR_FS_BASIC);
-  return { prog: fallback, textured: false };
-}
-
-const EMPTY_GEAR = { helmet: null, torso: null, legs: null };
-
-function CharacterViewer({ race, sex, gear = EMPTY_GEAR, height = 230, reducedMotion }) {
-  const canvasRef = useRef(null);
-  const gearKey = `${gear.helmet || ""}|${gear.torso || ""}|${gear.legs || ""}`;
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const gl = canvas.getContext("webgl", { antialias: true, alpha: true, preserveDrawingBuffer: true });
-    if (!gl) return;
-
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = canvas.clientWidth || 300;
-    const h = canvas.clientHeight || height;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-
-    const { prog, textured } = compileWithFallback(gl);
-    if (!prog) return;
-    gl.useProgram(prog);
-
-    const verts = buildCharacterMesh(race, sex, gear);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-    const stride = 44;
-    const attrs = textured
-      ? [["aPos", 0, 3], ["aNormal", 12, 3], ["aColor", 24, 3], ["aUV", 36, 2]]
-      : [["aPos", 0, 3], ["aNormal", 12, 3], ["aColor", 24, 3]];
-    attrs.forEach(([name, off, n]) => {
-      const loc = gl.getAttribLocation(prog, name);
-      if (loc < 0) return;
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, n, gl.FLOAT, false, stride, off);
-    });
-    gl.enable(gl.DEPTH_TEST);
-
-    if (textured) {
-      const tex = createDetailTexture(gl);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
-    }
-
-    gl.uniformMatrix4fv(
-      gl.getUniformLocation(prog, "uProj"), false,
-      m4perspective(0.72, w / h, 0.1, 20)
-    );
-    const uModel = gl.getUniformLocation(prog, "uModel");
-
-    let raf = 0;
-    const t0 = performance.now();
-    function draw(now) {
-      const time = (now - t0) / 1000;
-      const t = reducedMotion ? 0.55 : time * 0.9;
-      // Idle life: a slow breath-bob and a gentle sway, layered on the spin
-      const bob = reducedMotion ? 0 : Math.sin(time * 2.2) * 0.012;
-      const sway = reducedMotion ? 0 : Math.sin(time * 1.1) * 0.015;
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      const model = m4mul(
-        m4trans(sway * 0.4, 0.02 + bob, -2.9),
-        m4mul(m4rotX(0.10 + sway * 0.5), m4rotY(t))
-      );
-      gl.uniformMatrix4fv(uModel, false, model);
-      gl.drawArrays(gl.TRIANGLES, 0, verts.length / 11);
-      if (!reducedMotion) raf = requestAnimationFrame(draw);
-    }
-    raf = requestAnimationFrame(draw);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      const ext = gl.getExtension("WEBGL_lose_context");
-      if (ext) ext.loseContext();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [race, sex, gearKey, height, reducedMotion]);
-
-  return (
-    <canvas
-      key={`${race}-${sex}-${gearKey}`}
-      ref={canvasRef}
-      className="rlxp-char-canvas"
-      style={{ height }}
-    />
-  );
-}
-
-/* =======================================================================
-   3D CHEST — same hand-rolled WebGL approach as the character viewer.
-   Two independently-posed pieces: a static base and a lid that swings
-   open on a hinge, driven by openProgress (0 closed -> 1 open).
-   ======================================================================= */
-
-const CHEST_HALF_W = 0.50;
-const CHEST_HALF_D = 0.32;
-const CHEST_BASE_H = 0.40;
-const CHEST_LID_H = 0.20;
-const CHEST_LID_D = CHEST_HALF_D * 2 + 0.04;
-const CHEST_HINGE = [0, CHEST_BASE_H, -CHEST_HALF_D];
-
-function buildChestMesh(tier) {
-  const mat = CHEST_MATERIAL[tier] || CHEST_MATERIAL.common;
-  const wood = mat.wood, metal = mat.metal;
-  const w = CHEST_HALF_W, d = CHEST_HALF_D, bh = CHEST_BASE_H, lh = CHEST_LID_H, ld = CHEST_LID_D;
-
-  const base = [];
-  addBox(base, 0, bh / 2, 0, w * 2, bh, d * 2, wood);                       // main body
-  [-1, 1].forEach((sx) => {
-    addBox(base, sx * w, bh / 2, d, 0.08, bh, 0.08, metal);                 // front corner post
-    addBox(base, sx * (w + 0.01), 0.03, 0, 0.09, 0.06, 0.09, shade(wood, 0.5)); // foot
-  });
-  [bh * 0.25, bh * 0.75].forEach((y) => {
-    addBox(base, 0, y, d + 0.005, w * 2 + 0.02, 0.05, 0.02, metal);         // front band
-    addBox(base, -w - 0.005, y, 0, 0.02, 0.05, d * 2 + 0.02, metal);        // left band
-    addBox(base, w + 0.005, y, 0, 0.02, 0.05, d * 2 + 0.02, metal);         // right band
-  });
-  addBox(base, 0, bh - 0.02, d + 0.02, 0.15, 0.11, 0.03, metal);            // lock (base half)
-  addBox(base, 0, 0.03, 0, w * 1.7, 0.02, d * 1.5, [
-    Math.min(1, wood[0] * 2.4 + 0.2),
-    Math.min(1, wood[1] * 2.4 + 0.15),
-    Math.min(1, wood[2] * 1.6 + 0.05),
-  ]); // interior glow
-
-  // Lid parts are authored relative to the hinge (0,0,0) = back-top edge of
-  // the base, so rotating this array around X swings it open naturally.
-  const lid = [];
-  addBox(lid, 0, lh / 2, ld / 2, w * 2 + 0.02, lh, ld, wood);
-  addTaperBox(lid, 0, lh, ld / 2, (w * 2 + 0.02) * 0.9, ld * 0.85, (w * 2 + 0.02) * 0.55, ld * 0.45, 0.10, shade(wood, 1.15)); // domed top
-  addBox(lid, 0, lh * 0.42, ld - 0.02, w * 2 + 0.04, 0.055, 0.02, metal);   // front band
-  [-1, 1].forEach((sx) => {
-    addBox(lid, sx * (w + 0.01), lh * 0.42, ld * 0.72, 0.02, 0.055, ld * 0.55, metal); // side band
-    addBox(lid, sx * w, lh / 2, ld - 0.05, 0.08, lh, 0.08, shade(metal, 0.9));         // corner cap
-  });
-  addBox(lid, 0, 0.03, ld - 0.02, 0.13, 0.09, 0.03, metal);                 // lock (lid half)
-
-  return { base: new Float32Array(base), lid: new Float32Array(lid) };
-}
-
-function easeOutBack(x) {
-  const c1 = 1.70158, c3 = c1 + 1;
-  return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
-}
-
-/* =======================================================================
-   3D BOSSES — six creatures, same hand-rolled primitives as the character.
-   Each is built feet-at-zero then normalised to a common height so one
-   camera frames them all, whatever their proportions.
-   ======================================================================= */
-
-function ChestViewer({ tier, openProgress = 0, height = 190, reducedMotion }) {
-  const canvasRef = useRef(null);
-  const progressRef = useRef(openProgress);
-  useEffect(() => {
-    progressRef.current = openProgress;
-  }, [openProgress]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const gl = canvas.getContext("webgl", { antialias: true, alpha: true, preserveDrawingBuffer: true });
-    if (!gl) return;
-
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = canvas.clientWidth || 300;
-    const h = canvas.clientHeight || height;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    gl.viewport(0, 0, canvas.width, canvas.height);
-
-    const { prog, textured } = compileWithFallback(gl);
-    if (!prog) return;
-    gl.useProgram(prog);
-
-    const mesh = buildChestMesh(tier);
-    const baseBuf = gl.createBuffer();
-    const lidBuf = gl.createBuffer();
-    const stride = 44;
-    const attrs = textured
-      ? [["aPos", 0, 3], ["aNormal", 12, 3], ["aColor", 24, 3], ["aUV", 36, 2]]
-      : [["aPos", 0, 3], ["aNormal", 12, 3], ["aColor", 24, 3]];
-    function bindAttribs(buf, data) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-      attrs.forEach(([name, off, n]) => {
-        const loc = gl.getAttribLocation(prog, name);
-        if (loc < 0) return;
-        gl.enableVertexAttribArray(loc);
-        gl.vertexAttribPointer(loc, n, gl.FLOAT, false, stride, off);
-      });
-    }
-
-    gl.enable(gl.DEPTH_TEST);
-
-    if (textured) {
-      const tex = createDetailTexture(gl);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
-    }
-
-    gl.uniformMatrix4fv(
-      gl.getUniformLocation(prog, "uProj"), false,
-      m4perspective(0.72, w / h, 0.1, 20)
-    );
-    const uModel = gl.getUniformLocation(prog, "uModel");
-
-    let raf = 0;
-    const t0 = performance.now();
-    function draw(now) {
-      const t = reducedMotion ? 0.4 : ((now - t0) / 1000) * 0.6;
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-      const outer = m4mul(
-        m4trans(0, -(CHEST_BASE_H + CHEST_LID_H) / 2 + 0.03, -2.55),
-        m4mul(m4rotX(0.30), m4rotY(t))
-      );
-
-      bindAttribs(baseBuf, mesh.base);
-      gl.uniformMatrix4fv(uModel, false, outer);
-      gl.drawArrays(gl.TRIANGLES, 0, mesh.base.length / 11);
-
-      const progress = progressRef.current;
-      const angle = -1.78 * easeOutBack(Math.max(0, Math.min(progress, 1.08)));
-      const lidModel = m4mul(
-        outer,
-        m4mul(m4trans(CHEST_HINGE[0], CHEST_HINGE[1], CHEST_HINGE[2]), m4rotX(angle))
-      );
-      bindAttribs(lidBuf, mesh.lid);
-      gl.uniformMatrix4fv(uModel, false, lidModel);
-      gl.drawArrays(gl.TRIANGLES, 0, mesh.lid.length / 11);
-
-      raf = requestAnimationFrame(draw);
-    }
-    raf = requestAnimationFrame(draw);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      const ext = gl.getExtension("WEBGL_lose_context");
-      if (ext) ext.loseContext();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier, height, reducedMotion]);
-
-  return (
-    <canvas
-      key={tier}
-      ref={canvasRef}
-      className="rlxp-chest-canvas"
-      style={{ height }}
-    />
-  );
-}
-
-/* ---------------- Character panel ---------------- */
-
-function BodyPartRow({ label, xp }) {
-  const level = levelForXp(xp);
-  const isMax = level >= MAX_LEVEL;
-  const start = xpForLevel(level);
-  const end = isMax ? start : xpForLevel(level + 1);
-  const pct = isMax ? 100 : Math.min(((xp - start) / Math.max(end - start, 1)) * 100, 100);
-  return (
-    <div className="rlxp-skill-row">
-      <div className="rlxp-skill-header">
-        <span className="rlxp-skill-name">{label}</span>
-        <span className="rlxp-skill-level">Lvl {level}</span>
-      </div>
-      <div className="rlxp-skill-track">
-        <div className="rlxp-skill-fill" style={{ width: `${pct}%` }} />
-      </div>
-      <div className="rlxp-skill-xp">{fmt(xp)} XP</div>
-    </div>
-  );
-}
-
-function GearSlotPicker({ slotDef, state, onEquipGear }) {
-  const owned = GEAR_ITEMS.filter(
-    (g) => g.slot === slotDef.key && (state.ownedGear || []).includes(g.id)
-  );
-  const equippedId = (state.equippedGear || {})[slotDef.key] || null;
-
-  return (
-    <div className="rlxp-gearslot">
-      <div className="rlxp-cosmetic-category-label">
-        <Glyph name={slotDef.glyph} size={17} /> {slotDef.label}
-      </div>
-      {owned.length === 0 ? (
-        <div className="rlxp-hint">Nothing yet — armour and accessories drop from chests.</div>
-      ) : (
-        <div className="rlxp-gear-chip-row">
-          <button
-            className={`rlxp-char-choice rlxp-gear-chip ${equippedId === null ? "rlxp-char-choice-on" : ""}`}
-            onClick={() => onEquipGear(slotDef.key, null)}
-          >
-            None
-          </button>
-          {owned.map((g) => {
-            const ok = gearEquippable(g, state);
-            return (
-              <button
-                key={g.id}
-                className={`rlxp-char-choice rlxp-gear-chip ${equippedId === g.id ? "rlxp-char-choice-on" : ""} ${!ok ? "rlxp-gear-locked" : ""}`}
-                disabled={!ok}
-                onClick={() => ok && onEquipGear(slotDef.key, g.id)}
-              >
-                {g.label}
-                {!ok && <span className="rlxp-gear-req"> · Lvl {g.levelReq}</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CharacterPanel({ state, onChooseCharacter, onEquipGear, onClose }) {
-  const char = state.character;
-  const [editing, setEditing] = useState(!char);
-  const [race, setRace] = useState((char && char.race) || "human");
-  const [sex, setSex] = useState((char && char.sex) || "male");
-  const reducedMotion = state.settings.reducedMotion;
-  const bp = state.bodyPartXp || {};
-  const gear = state.equippedGear || EMPTY_GEAR;
-
-  const sideStats = [
-    { label: "Strength", level: levelForXp(state.skills.Strength || 0) },
-    { label: "Cardio", level: levelForXp(state.skills.Agility || 0) },
-    { label: "Mobility", level: levelForXp(state.skills.Mobility || 0) },
-  ];
-
-  return (
-    <div className="rlxp-modal-overlay" onClick={onClose}>
-      <div className="rlxp-modal-sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="rlxp-modal-header">
-          <span>Character</span>
-          <button className="rlxp-modal-close" onClick={onClose}><Glyph name="cross" size={16} /></button>
-        </div>
-        <div className="rlxp-modal-body">
-          <div className="rlxp-char-stage">
-            <CharacterViewer race={race} sex={sex} gear={gear} reducedMotion={reducedMotion} />
-            {!editing && char && (
-              <div className="rlxp-char-caption">
-                {RACES[char.race].label} · {char.sex === "female" ? "Female" : "Male"}
-              </div>
-            )}
-          </div>
-
-          {editing ? (
-            <>
-              <div className="rlxp-cosmetic-category-label">Race</div>
-              <div className="rlxp-char-choice-row">
-                {RACE_KEYS.map((k) => (
-                  <button
-                    key={k}
-                    className={`rlxp-char-choice ${race === k ? "rlxp-char-choice-on" : ""}`}
-                    onClick={() => setRace(k)}
-                  >
-                    {RACES[k].label}
-                  </button>
-                ))}
-              </div>
-              <div className="rlxp-cosmetic-category-label">Body</div>
-              <div className="rlxp-char-choice-row">
-                {SEXES.map((sx) => (
-                  <button
-                    key={sx.key}
-                    className={`rlxp-char-choice ${sex === sx.key ? "rlxp-char-choice-on" : ""}`}
-                    onClick={() => setSex(sx.key)}
-                  >
-                    {sx.label}
-                  </button>
-                ))}
-              </div>
-              <button
-                className="rlxp-btn-primary rlxp-full"
-                onClick={() => {
-                  onChooseCharacter(race, sex);
-                  setEditing(false);
-                }}
-              >
-                {char ? "Save appearance" : "Create character"}
-              </button>
-            </>
-          ) : (
-            <>
-              <div className="rlxp-char-stats-grid">
-                <div className="rlxp-char-main-stats">
-                  <BodyPartRow label="Arms" xp={bp.Arms || 0} />
-                  <BodyPartRow label="Legs" xp={bp.Legs || 0} />
-                </div>
-                <div className="rlxp-char-side-stats">
-                  {sideStats.map((st) => (
-                    <div key={st.label} className="rlxp-char-side-stat">
-                      <span className="rlxp-char-side-level">{st.level}</span>
-                      <span className="rlxp-char-side-label">{st.label}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rlxp-settings-divider" />
-              <div className="rlxp-inventory-section-title">Equipment</div>
-              {GEAR_SLOT_DEFS.map((sl) => (
-                <GearSlotPicker key={sl.key} slotDef={sl} state={state} onEquipGear={onEquipGear} />
-              ))}
-              <div className="rlxp-hint">
-                Armour needs both the item (from chests) and the level stamped on it. Accessories
-                can be worn at any level.
-              </div>
-
-              <button className="rlxp-btn-secondary rlxp-full" onClick={() => setEditing(true)}>
-                Change appearance
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- First-run onboarding ---------------- */
-
 const ONBOARDING_STEPS = [
   {
     art: "sword",
@@ -2320,6 +1518,218 @@ const ONBOARDING_STEPS = [
     body: "Chests hold XP, cosmetics and rest tokens — a token skips one day's penalty for when life gets in the way. You get chests every 5 days in a row, every 10 levels, and quests can drop tokens and loot too. Rarer quest, better payout.",
   },
 ];
+
+
+
+const GEAR_SLOT_DEFS = [
+  { key: "helmet", label: "Helmet", piece: "Full Helm", glyph: "helm" },
+  { key: "torso", label: "Torso", piece: "Platebody", glyph: "platebody" },
+  { key: "legs", label: "Legs", piece: "Platelegs", glyph: "platelegs" },
+];
+
+/* Accessories: fun items, no level requirement, equip any time */
+
+/* Which armour sets each chest rarity can drop */
+const CHEST_GEAR_POOL = {
+  common: ["bronze", "iron"],
+  rare: ["steel", "black"],
+  epic: ["mithril", "adamantite"],
+  legendary: ["runite", "dragon"],
+  mythic: ["runite", "dragon"],
+};
+
+
+/* --- tiny column-major matrix helpers --- */
+/* Push one axis-aligned box: 36 verts of [pos, normal, colour] */
+
+/* Shared quad emitter: computes the face normal from the winding and emits
+   two triangles of 11-float vertices [pos, normal, colour, uv]. */
+/* Tapered box (frustum): different width/depth at bottom vs top. This is the
+   primitive that makes forms read as classic low-poly MMO art — flared
+   skirts, trapezoid torsos, limbs that thin toward the joint, narrow chins —
+   instead of stacks of straight crates. */
+/* =======================================================================
+   3D BOSSES — six creatures, same hand-rolled primitives as the character.
+   Each is built feet-at-zero then normalised to a common height so one
+   camera frames them all, whatever their proportions.
+   ======================================================================= */
+
+/* ---------------- Character panel ---------------- */
+
+function BodyPartRow({ label, xp }) {
+  const level = levelForXp(xp);
+  const isMax = level >= MAX_LEVEL;
+  const start = xpForLevel(level);
+  const end = isMax ? start : xpForLevel(level + 1);
+  const pct = isMax ? 100 : Math.min(((xp - start) / Math.max(end - start, 1)) * 100, 100);
+  return (
+    <div className="rlxp-skill-row">
+      <div className="rlxp-skill-header">
+        <span className="rlxp-skill-name">{label}</span>
+        <span className="rlxp-skill-level">Lvl {level}</span>
+      </div>
+      <div className="rlxp-skill-track">
+        <div className="rlxp-skill-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="rlxp-skill-xp">{fmt(xp)} XP</div>
+    </div>
+  );
+}
+
+function CharacterPanel({ state, onChooseCharacter, onBuyCharacter, onEquipFlourish, onEquipWeapon, onClose }) {
+  const char = state.character;
+  const currentSpriteId = (char && char.spriteId) || "human";
+  const reducedMotion = state.settings.reducedMotion;
+
+  const sideStats = [
+    { label: "Strength", xp: state.skills.Strength || 0 },
+    { label: "Cardio", xp: state.skills.Agility || 0 },
+    { label: "Mobility", xp: state.skills.Mobility || 0 },
+  ];
+
+  /* Only show body parts that have actually been trained — an empty list of
+     zeros tells you nothing and makes the page look broken. */
+  const bodyRows = Object.entries(state.bodyPartXp || {})
+    .filter(([, xp]) => xp > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, xp]) => ({ name, xp }));
+
+  const ownedFlourishes = FLOURISH_IDS.filter((f) => flourishOwned(f, state));
+  const ownedWeapons = WEAPON_IDS.filter((w) => weaponOwned(w, state));
+
+  return (
+    <div className="rlxp-modal-overlay" onClick={onClose}>
+      <div className="rlxp-modal-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="rlxp-modal-header">
+          <span>Character</span>
+          <button className="rlxp-modal-close" onClick={onClose}><Glyph name="cross" size={16} /></button>
+        </div>
+        <div className="rlxp-modal-body">
+
+          {/* who you are right now */}
+          <div className="rlxp-char-stage">
+            <div className="rlxp-char-sprite-wrap">
+              <Sprite id={currentSpriteId} anim="idle" scale={6} reducedMotion={reducedMotion} />
+            </div>
+            <div className="rlxp-char-caption">
+              {(SPRITES[currentSpriteId] || {}).name || "Wanderer"}
+            </div>
+          </div>
+
+          <div className="rlxp-cosmetic-category-label">Your levels</div>
+          {sideStats.map((st) => (
+            <SkillRow key={st.label} name={st.label} xp={st.xp} />
+          ))}
+
+          {bodyRows.length > 0 && (
+            <>
+              <div className="rlxp-cosmetic-category-label">Body</div>
+              {bodyRows.map((r) => (
+                <SkillRow key={r.name} name={r.name} xp={r.xp} />
+              ))}
+            </>
+          )}
+
+          {/* ---- heroes you own ---- */}
+          <div className="rlxp-cosmetic-category-label">Heroes</div>
+          <div className="rlxp-shop-preview-grid">
+            {CHARACTER_IDS.map((cid) => {
+              const def = SPRITES[cid];
+              const unlocked = characterUnlocked(cid, state);
+              const worn = currentSpriteId === cid;
+              return (
+                <div key={cid} className={`rlxp-preview-card ${worn ? "rlxp-preview-card-on" : ""}`}>
+                  <div className={`rlxp-preview-stage ${unlocked ? "" : "rlxp-preview-locked"}`}>
+                    <Sprite id={cid} anim="idle" scale={4} playing={unlocked} reducedMotion={reducedMotion} />
+                  </div>
+                  <div className="rlxp-preview-name">{def.name}</div>
+                  {unlocked ? (
+                    <button className="rlxp-preview-btn" disabled={worn}
+                      onClick={() => onChooseCharacter({ spriteId: cid })}>
+                      {worn ? "Equipped" : "Wear this"}
+                    </button>
+                  ) : (
+                    <div className="rlxp-preview-note">Locked — visit the merchant</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ---- weapons you own ---- */}
+          <div className="rlxp-cosmetic-category-label">Armoury</div>
+          {ownedWeapons.length === 0 ? (
+            <div className="rlxp-hint">
+              Nothing in hand. Weapons change what your hero swings when you log
+              — buy one from the merchant.
+            </div>
+          ) : (
+            <div className="rlxp-shop-preview-grid">
+              {ownedWeapons.map((wid) => {
+                const w = WEAPONS[wid];
+                const held = state.equippedWeapon === wid;
+                return (
+                  <div key={wid} className={`rlxp-preview-card ${held ? "rlxp-preview-card-on" : ""}`}>
+                    <div className="rlxp-preview-stage">
+                      <WeaponSprite weaponId={wid} spriteId={currentSpriteId} scale={4} reducedMotion={reducedMotion} />
+                    </div>
+                    <div className="rlxp-preview-name">{w.name}</div>
+                    <button className="rlxp-preview-btn"
+                      onClick={() => onEquipWeapon(held ? null : wid)}>
+                      {held ? "Unequip" : "Equip"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ---- flourishes you own ---- */}
+          <div className="rlxp-cosmetic-category-label">Flourishes</div>
+          {ownedFlourishes.length === 0 ? (
+            <div className="rlxp-hint">
+              None yet. Flourishes are moves your hero performs when you log a
+              workout — buy them from the merchant.
+            </div>
+          ) : (
+            <div className="rlxp-shop-preview-grid">
+              {ownedFlourishes.map((fid) => {
+                const f = FLOURISHES[fid];
+                const usable = flourishUsable(fid, currentSpriteId);
+                const equipped = state.equippedFlourish === fid;
+                const previewOn = usable ? currentSpriteId : f.characters[0];
+                return (
+                  <div key={fid} className={`rlxp-preview-card ${equipped ? "rlxp-preview-card-on" : ""}`}>
+                    <div className="rlxp-preview-stage">
+                      {f.effect ? (
+                        <div className="rlxp-effect-stack">
+                          <Sprite id={previewOn} anim="idle" scale={4} reducedMotion={reducedMotion} />
+                          <EffectSprite id={f.effect} scale={2} reducedMotion={reducedMotion} />
+                        </div>
+                      ) : (
+                        <Sprite id={previewOn} anim={f.anim} scale={4} reducedMotion={reducedMotion} />
+                      )}
+                    </div>
+                    <div className="rlxp-preview-name">{f.name}</div>
+                    {!usable && (
+                      <div className="rlxp-preview-note">
+                        Only the {SPRITES[f.characters[0]].name} can do this
+                      </div>
+                    )}
+                    <button className="rlxp-preview-btn" disabled={equipped || !usable}
+                      onClick={() => onEquipFlourish(fid)}>
+                      {equipped ? "Equipped" : "Equip"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function OnboardingFlow({ onComplete, reducedMotion }) {
   const [step, setStep] = useState(0);
@@ -2358,29 +1768,10 @@ function OnboardingFlow({ onComplete, reducedMotion }) {
           <>
             <div className="rlxp-onboard-title">Choose your hero</div>
             <div className="rlxp-char-stage rlxp-onboard-char">
-              <CharacterViewer race={race} sex={sex} height={190} reducedMotion={reducedMotion} />
-            </div>
-            <div className="rlxp-char-choice-row">
-              {RACE_KEYS.map((k) => (
-                <button
-                  key={k}
-                  className={`rlxp-char-choice ${race === k ? "rlxp-char-choice-on" : ""}`}
-                  onClick={() => setRace(k)}
-                >
-                  {RACES[k].label}
-                </button>
-              ))}
-            </div>
-            <div className="rlxp-char-choice-row">
-              {SEXES.map((sx) => (
-                <button
-                  key={sx.key}
-                  className={`rlxp-char-choice ${sex === sx.key ? "rlxp-char-choice-on" : ""}`}
-                  onClick={() => setSex(sx.key)}
-                >
-                  {sx.label}
-                </button>
-              ))}
+              <div className="rlxp-char-sprite-wrap">
+                <Sprite id="human" anim="idle" scale={6} reducedMotion={reducedMotion} />
+              </div>
+              <div className="rlxp-char-caption">The Wanderer</div>
             </div>
             <button className="rlxp-btn-primary rlxp-full" onClick={() => setStep(nameStep)}>
               This is me
@@ -2510,6 +1901,31 @@ function LevelUpCelebration({ info, onDone, reducedMotion }) {
 
 /* ---------------- Skills panel ---------------- */
 
+/* One level row, used by both the Character page and the Skills list, so the
+   two can never drift apart the way they just did. */
+function SkillRow({ name, xp }) {
+  const level = levelForXp(xp);
+  const isMax = level >= MAX_LEVEL;
+  const levelStart = xpForLevel(level);
+  const levelEnd = isMax ? levelStart : xpForLevel(level + 1);
+  const span = Math.max(levelEnd - levelStart, 1);
+  const pct = isMax ? 100 : Math.min(((xp - levelStart) / span) * 100, 100);
+  return (
+    <div className="rlxp-skill-row">
+      <div className="rlxp-skill-header">
+        <span className="rlxp-skill-name">{name}</span>
+        <span className="rlxp-skill-level">Level {level}{isMax ? " (max)" : ""}</span>
+      </div>
+      <div className="rlxp-skill-track">
+        <div className="rlxp-skill-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="rlxp-skill-xp">
+        {isMax ? `${fmt(xp)} XP` : `${fmt(xp - levelStart)} / ${fmt(levelEnd - levelStart)} XP to level ${level + 1}`}
+      </div>
+    </div>
+  );
+}
+
 function SkillsPanel({ skills, onClose }) {
   const rows = useMemo(() => {
     return Object.entries(skills)
@@ -2525,25 +1941,9 @@ function SkillsPanel({ skills, onClose }) {
           <button className="rlxp-modal-close" onClick={onClose}><Glyph name="cross" size={16} /></button>
         </div>
         <div className="rlxp-modal-body">
-          {rows.map((r) => {
-            const isMax = r.level >= MAX_LEVEL;
-            const levelStart = xpForLevel(r.level);
-            const levelEnd = isMax ? levelStart : xpForLevel(r.level + 1);
-            const span = Math.max(levelEnd - levelStart, 1);
-            const pct = isMax ? 100 : Math.min(((r.xp - levelStart) / span) * 100, 100);
-            return (
-              <div key={r.name} className="rlxp-skill-row">
-                <div className="rlxp-skill-header">
-                  <span className="rlxp-skill-name">{r.name}</span>
-                  <span className="rlxp-skill-level">Lvl {r.level}{isMax ? " (max)" : ""}</span>
-                </div>
-                <div className="rlxp-skill-track">
-                  <div className="rlxp-skill-fill" style={{ width: `${pct}%` }} />
-                </div>
-                <div className="rlxp-skill-xp">{fmt(r.xp)} XP total</div>
-              </div>
-            );
-          })}
+          {rows.map((r) => (
+            <SkillRow key={r.name} name={r.name} xp={r.xp} />
+          ))}
         </div>
       </div>
     </div>
@@ -2560,7 +1960,7 @@ const LOOT_ICON = {
 };
 
 function lootIcon(entry) {
-  if (entry.kind === "gear") {
+  if (entry.kind === "gear") { // legacy saves only
     const def = GEAR_SLOT_DEFS.find((d) => d.key === entry.slot);
     return def ? def.glyph : "sword";
   }
@@ -2653,7 +2053,14 @@ function ChestOpeningModal({ chest, loot, onCollect, reducedMotion }) {
                 ))}
               </span>
             )}
-            <ChestViewer tier={chest.tier} openProgress={openProgress} reducedMotion={reducedMotion} />
+            <div
+              className="rlxp-chest-glyph-stage"
+              style={{
+                transform: `scale(${1 + openProgress * 0.22}) translateY(${-openProgress * 10}px)`,
+              }}
+            >
+              <ChestGlyph tier={chest.tier} size={132} />
+            </div>
           </button>
         )}
 
@@ -2777,9 +2184,12 @@ function EncouragementScroll({ note, onClose }) {
 
 /* ---------------- Active quest strip ---------------- */
 
-function BossPanel({ boss, reducedMotion, lastHit }) {
+function BossPanel({ boss, state, reducedMotion, lastHit, attacking }) {
   if (!boss) return null;
   const pct = Math.max(0, Math.min((boss.hp / Math.max(boss.maxHp, 1)) * 100, 100));
+  const hero = (state.character && state.character.spriteId) || "human";
+  const weapon = state.equippedWeapon;
+
   return (
     <div className={`rlxp-boss-panel ${boss.defeated ? "rlxp-boss-defeated" : ""}`}>
       <div className="rlxp-boss-banner">
@@ -2788,29 +2198,33 @@ function BossPanel({ boss, reducedMotion, lastHit }) {
         <span className="rlxp-boss-banner-rule" />
       </div>
 
-      <div className="rlxp-boss-stage">
-        <div className="rlxp-boss-sprite">
-          <Sprite
-            id="orc"
-            anim={boss.defeated ? "idle" : "idle"}
-            scale={5}
-            playing={!boss.defeated}
-            reducedMotion={reducedMotion}
-          />
+      {/* The fight, laid out like a duel: you on the left, it on the right.
+          Logging a workout is your turn. */}
+      <Backdrop id={(state.equippedBackdrop) || "none"} className="rlxp-battle">
+        <div className={`rlxp-battle-hero ${attacking ? "rlxp-battle-lunge" : ""}`}>
+          {attacking && weapon ? (
+            <WeaponSprite weaponId={weapon} spriteId={hero} facing="down" scale={4} reducedMotion={reducedMotion} />
+          ) : (
+            <Sprite id={hero} anim={attacking ? "attack" : "idle"} facing="down" scale={4} reducedMotion={reducedMotion} />
+          )}
         </div>
-        {lastHit != null && (
-          <span key={lastHit.id} className="rlxp-boss-hit">-{fmt(lastHit.amount)}</span>
-        )}
-      </div>
+
+        <div className="rlxp-battle-gap">
+          {lastHit != null && (
+            <span key={lastHit.id} className="rlxp-battle-hit">-{fmt(lastHit.amount)}</span>
+          )}
+        </div>
+
+        <div className={`rlxp-battle-boss ${attacking ? "rlxp-battle-recoil" : ""} ${boss.defeated ? "rlxp-battle-dead" : ""}`}>
+          <Sprite id="orc" anim="idle" facing="down" scale={4} playing={!boss.defeated} reducedMotion={reducedMotion} />
+        </div>
+      </Backdrop>
 
       <div className="rlxp-boss-name">{boss.name}</div>
 
       <div className="rlxp-boss-hpwrap">
         <div className="rlxp-boss-track">
-          <div
-            className={`rlxp-boss-fill ${boss.defeated ? "rlxp-boss-fill-dead" : ""}`}
-            style={{ width: `${pct}%` }}
-          />
+          <div className={`rlxp-boss-fill ${boss.defeated ? "rlxp-boss-fill-dead" : ""}`} style={{ width: `${pct}%` }} />
           <span className="rlxp-boss-hptext">
             {boss.defeated ? "Defeated" : `${fmt(boss.hp)} / ${fmt(boss.maxHp)} HP`}
           </span>
@@ -2820,14 +2234,87 @@ function BossPanel({ boss, reducedMotion, lastHit }) {
       <div className="rlxp-boss-days">
         {boss.defeated
           ? "A new challenger arrives next week"
-          : `${boss.daysRemaining} day${boss.daysRemaining === 1 ? "" : "s"} left — every activity you log deals damage`}
+          : `${boss.daysRemaining} day${boss.daysRemaining === 1 ? "" : "s"} left — every activity you log lands a hit`}
       </div>
     </div>
   );
 }
 
-function ChestShop({ coins, onBuy, onClose }) {
+/* Shown right after a log, because the whole point of buying a weapon is
+   watching it land — and the log sheet was covering that up entirely.
+   Auto-closes, so it never becomes another thing to dismiss. */
+function BattleModal({ boss, state, damage, reducedMotion, onClose }) {
+  const [phase, setPhase] = useState("ready");
+  const hero = (state.character && state.character.spriteId) || "human";
+  const weapon = state.equippedWeapon;
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase("strike"), 480);
+    const t2 = setTimeout(() => setPhase("after"), 1700);
+    const t3 = setTimeout(onClose, 2900);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const striking = phase === "strike";
+  // show HP before the hit, then let it drain — you watch it come off
+  const shownHp = phase === "ready" ? Math.min(boss.hp + damage, boss.maxHp) : boss.hp;
+  const pct = Math.max(0, Math.min((shownHp / Math.max(boss.maxHp, 1)) * 100, 100));
+
+  return (
+    <div className="rlxp-modal-overlay rlxp-battle-overlay" onClick={onClose}>
+      <div className="rlxp-battle-stage" onClick={(e) => e.stopPropagation()}>
+        <div className="rlxp-battle-title">{boss.name}</div>
+
+        <Backdrop id={state.equippedBackdrop} className="rlxp-battle rlxp-battle-big">
+          <div className={`rlxp-battle-hero ${striking ? "rlxp-battle-lunge" : ""}`}>
+            {striking && weapon ? (
+              <WeaponSprite weaponId={weapon} spriteId={hero} facing="down" scale={5} reducedMotion={reducedMotion} />
+            ) : (
+              <Sprite id={hero} anim={striking ? "attack" : "idle"} facing="down" scale={5} reducedMotion={reducedMotion} />
+            )}
+          </div>
+
+          <div className="rlxp-battle-gap">
+            {phase !== "ready" && (
+              <span className="rlxp-battle-hit">-{fmt(damage)}</span>
+            )}
+          </div>
+
+          <div className={`rlxp-battle-boss ${striking ? "rlxp-battle-recoil" : ""} ${boss.hp <= 0 ? "rlxp-battle-dead" : ""}`}>
+            <Sprite id="orc" anim="idle" facing="down" scale={5} playing={boss.hp > 0} reducedMotion={reducedMotion} />
+          </div>
+        </Backdrop>
+
+        <div className="rlxp-boss-track rlxp-battle-track">
+          <div
+            className={`rlxp-boss-fill ${boss.hp <= 0 ? "rlxp-boss-fill-dead" : ""}`}
+            style={{ width: `${pct}%` }}
+          />
+          <span className="rlxp-boss-hptext">
+            {boss.hp <= 0 ? "Defeated" : `${fmt(shownHp)} / ${fmt(boss.maxHp)} HP`}
+          </span>
+        </div>
+
+        <div className="rlxp-battle-foot">
+          {boss.hp <= 0 ? "It falls." : "Tap to continue"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChestShop({ state, coins, onBuy, onBuyCharacter, onBuyFlourish, onEquipFlourish, onWearCharacter, onBuyWeapon, onEquipWeapon, onBuyBackdrop, onEquipBackdrop, onClose }) {
+  const [tab, setTab] = useState("weapons");
   const [bought, setBought] = useState(null);
+  const reducedMotion = !!(state.settings && state.settings.reducedMotion);
+  const worn = (state.character && state.character.spriteId) || "human";
+
+  function confirm(label) {
+    setBought(label);
+    setTimeout(() => setBought(null), 1600);
+  }
+
   return (
     <div className="rlxp-modal-overlay" onClick={onClose}>
       <div className="rlxp-modal-sheet" onClick={(e) => e.stopPropagation()}>
@@ -2844,45 +2331,217 @@ function ChestShop({ coins, onBuy, onClose }) {
           <span className="rlxp-shop-purse-label">gold</span>
         </div>
 
+        <div className="rlxp-tabs">
+          {[["weapons", "Armoury"], ["flourishes", "Flourishes"], ["heroes", "Heroes"], ["scenes", "Scenes"], ["chests", "Chests"]].map(([k, label]) => (
+            <button
+              key={k}
+              className={`rlxp-tab ${tab === k ? "rlxp-tab-active" : ""}`}
+              onClick={() => setTab(k)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="rlxp-modal-body">
-          <div className="rlxp-hint rlxp-shop-blurb">
-            Gold comes from levelling, chests, bosses, quests and keeping your
-            daily streak alive. More to spend it on once the armoury is stocked.
-          </div>
-
-          <div className="rlxp-shop-grid">
-            {TIERS.map((tier) => {
-              const price = CHEST_PRICES[tier];
-              const afford = coins >= price;
-              return (
-                <div key={tier} className={`rlxp-shop-row rlxp-tier-${tier} ${afford ? "" : "rlxp-shop-locked"}`}>
-                  <ChestGlyph tier={tier} size={44} />
-                  <div className="rlxp-shop-info">
-                    <div className="rlxp-shop-name">{CHEST_LABEL[tier]}</div>
-                    <div className="rlxp-shop-tier">{TIER_LABEL[tier]}</div>
-                  </div>
-                  <button
-                    className="rlxp-shop-buy"
-                    disabled={!afford}
-                    onClick={() => {
-                      onBuy(tier);
-                      setBought(tier);
-                      setTimeout(() => setBought(null), 1400);
-                    }}
-                  >
-                    <Glyph name="coins" size={15} />
-                    <span>{fmt(price)}</span>
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-
-          {bought && (
-            <div className="rlxp-shop-confirm">
-              {CHEST_LABEL[bought]} added to your bag.
-            </div>
+          {tab === "weapons" && (
+            <>
+              <div className="rlxp-hint rlxp-shop-blurb">
+                Your hero swings whatever you're holding. Every weapon plays
+                here before you buy it.
+              </div>
+              <div className="rlxp-shop-preview-grid">
+                {WEAPON_IDS.map((wid) => {
+                  const w = WEAPONS[wid];
+                  const owned = weaponOwned(wid, state);
+                  const held = state.equippedWeapon === wid;
+                  const afford = coins >= w.cost;
+                  return (
+                    <div key={wid} className={`rlxp-preview-card ${held ? "rlxp-preview-card-on" : ""}`}>
+                      <div className="rlxp-preview-stage">
+                        <WeaponSprite weaponId={wid} spriteId={worn} scale={4} reducedMotion={reducedMotion} />
+                      </div>
+                      <div className="rlxp-preview-name">{w.name}</div>
+                      <div className="rlxp-preview-blurb">{w.blurb}</div>
+                      {owned ? (
+                        <button className="rlxp-preview-btn" disabled={held}
+                          onClick={() => onEquipWeapon(held ? null : wid)}>
+                          {held ? "Equipped" : "Equip"}
+                        </button>
+                      ) : (
+                        <button className="rlxp-preview-btn rlxp-preview-buy" disabled={!afford}
+                          onClick={() => { onBuyWeapon(wid); confirm(w.name + " is yours."); }}>
+                          <Glyph name="coins" size={14} /> {fmt(w.cost)}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
           )}
+
+          {tab === "flourishes" && (
+            <>
+              <div className="rlxp-hint rlxp-shop-blurb">
+                A move your character performs every time you log a workout.
+                Every one plays here before you buy it.
+              </div>
+              <div className="rlxp-shop-preview-grid">
+                {FLOURISH_IDS.map((fid) => {
+                  const f = FLOURISHES[fid];
+                  const owned = flourishOwned(fid, state);
+                  const usable = flourishUsable(fid, worn);
+                  const equipped = state.equippedFlourish === fid;
+                  // preview on a hero that can actually perform it
+                  const previewOn = usable ? worn : f.characters[0];
+                  const afford = coins >= f.cost;
+                  return (
+                    <div key={fid} className={`rlxp-preview-card ${equipped ? "rlxp-preview-card-on" : ""}`}>
+                      <div className="rlxp-preview-stage">
+                        {f.effect ? (
+                          <div className="rlxp-effect-stack">
+                            <Sprite id={previewOn} anim="idle" scale={4} reducedMotion={reducedMotion} />
+                            <EffectSprite id={f.effect} scale={2} reducedMotion={reducedMotion} />
+                          </div>
+                        ) : (
+                          <Sprite id={previewOn} anim={f.anim} scale={4} reducedMotion={reducedMotion} />
+                        )}
+                      </div>
+                      <div className="rlxp-preview-name">{f.name}</div>
+                      <div className="rlxp-preview-blurb">{f.blurb}</div>
+                      {!usable && (
+                        <div className="rlxp-preview-note">
+                          Only the {SPRITES[f.characters[0]].name} can do this
+                        </div>
+                      )}
+                      {owned ? (
+                        <button
+                          className="rlxp-preview-btn"
+                          disabled={equipped || !usable}
+                          onClick={() => onEquipFlourish(fid)}
+                        >
+                          {equipped ? "Equipped" : "Equip"}
+                        </button>
+                      ) : (
+                        <button
+                          className="rlxp-preview-btn rlxp-preview-buy"
+                          disabled={!afford}
+                          onClick={() => { onBuyFlourish(fid); confirm(f.name + " unlocked."); }}
+                        >
+                          <Glyph name="coins" size={14} /> {fmt(f.cost)}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {tab === "heroes" && (
+            <>
+              <div className="rlxp-hint rlxp-shop-blurb">
+                Swap who you play as. Owned heroes can be changed any time,
+                free.
+              </div>
+              <div className="rlxp-shop-preview-grid">
+                {CHARACTER_IDS.map((cid) => {
+                  const def = SPRITES[cid];
+                  const unlocked = characterUnlocked(cid, state);
+                  const cost = def.unlock.type === "gold" ? def.unlock.cost : null;
+                  const afford = cost != null && coins >= cost;
+                  return (
+                    <div key={cid} className={`rlxp-preview-card ${worn === cid ? "rlxp-preview-card-on" : ""}`}>
+                      <div className={`rlxp-preview-stage ${unlocked ? "" : "rlxp-preview-locked"}`}>
+                        <Sprite id={cid} anim="idle" scale={4} playing={unlocked} reducedMotion={reducedMotion} />
+                      </div>
+                      <div className="rlxp-preview-name">{def.name}</div>
+                      <div className="rlxp-preview-blurb">{def.blurb}</div>
+                      {unlocked ? (
+                        <button className="rlxp-preview-btn" disabled={worn === cid}
+                          onClick={() => onWearCharacter(cid)}>
+                          {worn === cid ? "Equipped" : "Wear this"}
+                        </button>
+                      ) : (
+                        <button className="rlxp-preview-btn rlxp-preview-buy" disabled={!afford}
+                          onClick={() => { onBuyCharacter(cid); confirm(def.name + " unlocked."); }}>
+                          <Glyph name="coins" size={14} /> {fmt(cost)}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {tab === "scenes" && (
+            <>
+              <div className="rlxp-hint rlxp-shop-blurb">
+                Where your hero stands, and where the boss fight happens.
+              </div>
+              <div className="rlxp-shop-preview-grid">
+                {BACKDROP_IDS.map((bid) => {
+                  const bd = BACKDROPS[bid];
+                  const owned = backdropOwned(bid, state);
+                  const equipped = (state.equippedBackdrop || "none") === bid;
+                  const afford = coins >= bd.cost;
+                  return (
+                    <div key={bid} className={`rlxp-preview-card ${equipped ? "rlxp-preview-card-on" : ""}`}>
+                      <Backdrop id={bid} className="rlxp-preview-stage rlxp-scene-preview">
+                        <Sprite id={worn} anim="idle" scale={3} reducedMotion={reducedMotion} />
+                      </Backdrop>
+                      <div className="rlxp-preview-name">{bd.name}</div>
+                      <div className="rlxp-preview-blurb">{bd.blurb}</div>
+                      {owned ? (
+                        <button className="rlxp-preview-btn" disabled={equipped}
+                          onClick={() => onEquipBackdrop(bid)}>
+                          {equipped ? "Equipped" : "Equip"}
+                        </button>
+                      ) : (
+                        <button className="rlxp-preview-btn rlxp-preview-buy" disabled={!afford}
+                          onClick={() => { onBuyBackdrop(bid); confirm(bd.name + " unlocked."); }}>
+                          <Glyph name="coins" size={14} /> {fmt(bd.cost)}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {tab === "chests" && (
+            <>
+              <div className="rlxp-hint rlxp-shop-blurb">
+                Gold comes from levelling, bosses, quests and keeping your daily
+                streak alive.
+              </div>
+              <div className="rlxp-shop-grid">
+                {TIERS.map((tier) => {
+                  const price = CHEST_PRICES[tier];
+                  const afford = coins >= price;
+                  return (
+                    <div key={tier} className={`rlxp-shop-row rlxp-tier-${tier} ${afford ? "" : "rlxp-shop-locked"}`}>
+                      <ChestGlyph tier={tier} size={44} />
+                      <div className="rlxp-shop-info">
+                        <div className="rlxp-shop-name">{CHEST_LABEL[tier]}</div>
+                        <div className="rlxp-shop-tier">{TIER_LABEL[tier]}</div>
+                      </div>
+                      <button className="rlxp-shop-buy" disabled={!afford}
+                        onClick={() => { onBuy(tier); confirm(CHEST_LABEL[tier] + " added to your bag."); }}>
+                        <Glyph name="coins" size={15} />
+                        <span>{fmt(price)}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {bought && <div className="rlxp-shop-confirm">{bought}</div>}
         </div>
       </div>
     </div>
@@ -2931,6 +2590,9 @@ function ActiveQuest({ quest, progress }) {
       </div>
       <div className="rlxp-quest-track">
         <div className={`rlxp-quest-fill ${done ? "rlxp-quest-fill-done" : ""}`} style={{ width: `${pct}%` }} />
+      </div>
+      <div className="rlxp-quest-progress">
+        {done ? "Complete — collect it in your bag" : `${fmt(progress)} / ${fmt(quest.target)}`}
       </div>
     </div>
   );
@@ -4029,6 +3691,24 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
   const [randomEvent, setRandomEvent] = useState(null);
   const [bossHit, setBossHit] = useState(null);
   const [coinFloaters, setCoinFloaters] = useState([]);
+  /* The equipped flourish plays once on a log, then the hero settles back to
+     idle. That moment is the whole reason to buy one. */
+  const [heroAnim, setHeroAnim] = useState("idle");
+  const [heroWeapon, setHeroWeapon] = useState(null);
+  const [attacking, setAttacking] = useState(false);
+  const [battleHit, setBattleHit] = useState(null);
+  const pendingXpRef = useRef(null);
+  const pendingBattleRef = useRef(false);
+  const [barPulse, setBarPulse] = useState(false);
+
+  /* The XP bar grows and a green number floats off it. Runs after the boss
+     popup rather than behind it, so the reward is actually seen. */
+  const showXpGain = useCallback((id, amount) => {
+    setFloaters((f) => [...f, { id, amount }]);
+    setBarPulse(true);
+    setTimeout(() => setBarPulse(false), 900);
+    setTimeout(() => setFloaters((f) => f.filter((x) => x.id !== id)), 1800);
+  }, []);
   const [encouragement, setEncouragement] = useState(null);
   const [floaters, setFloaters] = useState([]);
   const markerSeed = useRef(1);
@@ -4070,6 +3750,9 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
       const id = genId();
       Audio_.play("bossHit");
       setBossHit({ id, amount });
+      // the log sheet was covering the swing, so show it properly
+      pendingBattleRef.current = true;
+      setBattleHit({ id, amount });
       setTimeout(() => setBossHit((h) => (h && h.id === id ? null : h)), 1500);
     }
     if (randomEventRef.current) {
@@ -4100,8 +3783,28 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
       floaterRef.current = null;
       const id = genId();
       Audio_.play("logged");
-      setFloaters((f) => [...f, { id, amount }]);
-      setTimeout(() => setFloaters((f) => f.filter((x) => x.id !== id)), 1700);
+      /* If a boss fight is about to play, hold the XP celebration back — it
+         was firing behind the popup where nobody could see it. */
+      if (pendingBattleRef.current) {
+        pendingXpRef.current = { id, amount };
+      } else {
+        showXpGain(id, amount);
+      }
+      const worn = (state.character && state.character.spriteId) || "human";
+      // your turn: swing at the boss
+      setAttacking(true);
+      setTimeout(() => setAttacking(false), 1200);
+      // a held weapon takes priority — that's the whole point of buying one
+      if (state.equippedWeapon && WEAPONS[state.equippedWeapon]) {
+        setHeroWeapon(state.equippedWeapon);
+        setTimeout(() => setHeroWeapon(null), 1400);
+      } else {
+        const fl = state.equippedFlourish;
+        if (fl && flourishUsable(fl, worn) && FLOURISHES[fl]) {
+          setHeroAnim(FLOURISHES[fl].anim);
+          setTimeout(() => setHeroAnim("idle"), 1400);
+        }
+      }
     }
   }, [state]);
 
@@ -4563,22 +4266,21 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
     setState((prev) => (prev ? { ...prev, totalXp: value } : prev));
   }, []);
 
-  const handleChooseCharacter = useCallback((race, sex) => {
-    setState((prev) => (prev ? { ...prev, character: { race, sex } } : prev));
-  }, []);
-
-  const handleEquipGear = useCallback((slot, itemId) => {
+  /* Accepts either the old (race, sex) pair from onboarding or a full
+     character object from the hero picker, and merges rather than replaces —
+     choosing a sprite must never wipe the rest of the character. */
+  const handleChooseCharacter = useCallback((raceOrChar, sex) => {
     setState((prev) => {
       if (!prev) return prev;
-      if (itemId) {
-        const item = GEAR_BY_ID[itemId];
-        if (!item || !(prev.ownedGear || []).includes(itemId)) return prev;
-        if (!gearEquippable(item, prev)) return prev;
-      }
-      return { ...prev, equippedGear: { ...prev.equippedGear, [slot]: itemId } };
+      const patch =
+        raceOrChar && typeof raceOrChar === "object"
+          ? raceOrChar
+          : { race: raceOrChar, sex };
+      return { ...prev, character: { ...(prev.character || {}), ...patch } };
     });
   }, []);
 
+  
   const handleSetFocus = useCallback((focus) => {
     setState((prev) => (prev ? { ...prev, focus } : prev));
   }, []);
@@ -4591,6 +4293,150 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
 
   /* Remembers the numbers used for each exercise so it can be repeated with
      one tap next time, which is how most gym logging actually works. */
+  const handleBuyCharacter = useCallback((spriteId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      const def = SPRITES[spriteId];
+      if (!def || def.unlock.type !== "gold") return prev;
+      const owned = prev.ownedCharacters || [];
+      if (owned.includes(spriteId)) return prev;
+      if ((prev.coins || 0) < def.unlock.cost) return prev;   // never go negative
+      return {
+        ...prev,
+        coins: prev.coins - def.unlock.cost,
+        ownedCharacters: [...owned, spriteId],
+        // wearing it immediately is what you wanted when you bought it
+        character: { ...(prev.character || {}), spriteId },
+        history: [
+          ...prev.history,
+          {
+            id: genId(),
+            date: prev.lastProcessedDate,
+            type: "Purchase",
+            details: `Unlocked ${def.name} for ${fmt(def.unlock.cost)} gold`,
+            xp: 0,
+            totalAfter: prev.totalXp,
+          },
+        ],
+      };
+    });
+    Audio_.play("coins");
+  }, []);
+
+  const handleBuyFlourish = useCallback((flourishId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      const f = FLOURISHES[flourishId];
+      if (!f) return prev;
+      const owned = prev.ownedFlourishes || [];
+      if (owned.includes(flourishId)) return prev;
+      if ((prev.coins || 0) < f.cost) return prev;   // never go negative
+      return {
+        ...prev,
+        coins: prev.coins - f.cost,
+        ownedFlourishes: [...owned, flourishId],
+        // equip it straight away if the current hero can perform it
+        equippedFlourish: flourishUsable(flourishId, (prev.character || {}).spriteId || "human")
+          ? flourishId
+          : prev.equippedFlourish,
+        history: [
+          ...prev.history,
+          {
+            id: genId(),
+            date: prev.lastProcessedDate,
+            type: "Purchase",
+            details: `Unlocked the ${f.name} flourish for ${fmt(f.cost)} gold`,
+            xp: 0,
+            totalAfter: prev.totalXp,
+          },
+        ],
+      };
+    });
+    Audio_.play("coins");
+  }, []);
+
+  const handleEquipFlourish = useCallback((flourishId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      if (!(prev.ownedFlourishes || []).includes(flourishId)) return prev;
+      return { ...prev, equippedFlourish: flourishId };
+    });
+  }, []);
+
+  const handleBuyWeapon = useCallback((weaponId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      const w = WEAPONS[weaponId];
+      if (!w) return prev;
+      const owned = prev.ownedWeapons || [];
+      if (owned.includes(weaponId)) return prev;
+      if ((prev.coins || 0) < w.cost) return prev;   // never go negative
+      return {
+        ...prev,
+        coins: prev.coins - w.cost,
+        ownedWeapons: [...owned, weaponId],
+        equippedWeapon: weaponId,   // you bought it to hold it
+        history: [
+          ...prev.history,
+          {
+            id: genId(),
+            date: prev.lastProcessedDate,
+            type: "Purchase",
+            details: `Bought the ${w.name} for ${fmt(w.cost)} gold`,
+            xp: 0,
+            totalAfter: prev.totalXp,
+          },
+        ],
+      };
+    });
+    Audio_.play("coins");
+  }, []);
+
+  const handleEquipWeapon = useCallback((weaponId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      if (weaponId && !(prev.ownedWeapons || []).includes(weaponId)) return prev;
+      return { ...prev, equippedWeapon: weaponId };
+    });
+  }, []);
+
+  const handleBuyBackdrop = useCallback((backdropId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      const bd = BACKDROPS[backdropId];
+      if (!bd || !bd.cost) return prev;
+      const owned = prev.ownedBackdrops || [];
+      if (owned.includes(backdropId)) return prev;
+      if ((prev.coins || 0) < bd.cost) return prev;   // never go negative
+      return {
+        ...prev,
+        coins: prev.coins - bd.cost,
+        ownedBackdrops: [...owned, backdropId],
+        equippedBackdrop: backdropId,   // you bought it to look at it
+        history: [
+          ...prev.history,
+          {
+            id: genId(),
+            date: prev.lastProcessedDate,
+            type: "Purchase",
+            details: `Unlocked ${bd.name} for ${fmt(bd.cost)} gold`,
+            xp: 0,
+            totalAfter: prev.totalXp,
+          },
+        ],
+      };
+    });
+    Audio_.play("coins");
+  }, []);
+
+  const handleEquipBackdrop = useCallback((backdropId) => {
+    setState((prev) => {
+      if (!prev) return prev;
+      if (!backdropOwned(backdropId, prev)) return prev;
+      return { ...prev, equippedBackdrop: backdropId };
+    });
+  }, []);
+
   const handleBuyChest = useCallback((tier) => {
     setState((prev) => {
       if (!prev) return prev;
@@ -4671,7 +4517,7 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
               tier: "epic",
             },
           ]
-        : rollChestLoot(chest.tier, state.ownedCosmetics, state.ownedGear, state.todayTarget, !!chest.starter);
+        : rollChestLoot(chest.tier, state.ownedCosmetics, state.todayTarget, !!chest.starter);
       setOpeningChest({ chest, loot });
     },
     [state]
@@ -4689,7 +4535,6 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
         coins: (prev.coins || 0) + chestCoins,
         chests: prev.chests.filter((c) => c.id !== chest.id),
         ownedCosmetics: [...prev.ownedCosmetics],
-        ownedGear: [...(prev.ownedGear || [])],
         questScrolls: [...prev.questScrolls],
         history: [...prev.history],
       };
@@ -4697,8 +4542,6 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
       loot.forEach((entry) => {
         if (entry.kind === "cosmetic" && !next.ownedCosmetics.includes(entry.itemId)) {
           next.ownedCosmetics.push(entry.itemId);
-        } else if (entry.kind === "gear" && !next.ownedGear.includes(entry.itemId)) {
-          next.ownedGear.push(entry.itemId);
         } else if (entry.kind === "restToken") {
           next.restTokens = next.restTokens + entry.amount;
         } else if (entry.kind === "questScroll") {
@@ -4804,14 +4647,14 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
       {!storageOk && <StorageWarningBanner />}
 
       <div className="rlxp-topbar">
-        <IconButton label="Character" onClick={() => setShowCharacter(true)}><Glyph name="helm" size={24} /></IconButton>
+        <IconButton label="Hero" onClick={() => setShowCharacter(true)}><Glyph name="helm" size={24} /></IconButton>
         <div className="rlxp-bag-wrap">
-          <IconButton label="Inventory" onClick={() => setShowInventory(true)}><Glyph name="bag" size={24} /></IconButton>
+          <IconButton label="Bag" onClick={() => setShowInventory(true)}><Glyph name="bag" size={24} /></IconButton>
           {state.chests.length > 0 && (
             <span className="rlxp-bag-badge">{state.chests.length}</span>
           )}
         </div>
-        <IconButton label="Skills" onClick={() => setShowSkills(true)}><Glyph name="shield" size={24} /></IconButton>
+        <IconButton label="Shop" onClick={() => setShowShop(true)}><Glyph name="shop" size={24} /></IconButton>
         <IconButton label="History" onClick={() => setShowHistory(true)}><Glyph name="scroll" size={24} /></IconButton>
         <IconButton label="Settings" onClick={() => setShowSettings(true)}><Glyph name="gear" size={24} /></IconButton>
       </div>
@@ -4824,14 +4667,26 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
               aria-label="Open character"
               onClick={() => setShowCharacter(true)}
             >
-              <Sprite
-                id={state.character.spriteId || "human"}
-                anim="idle"
-                scale={3}
-                reducedMotion={reducedMotion}
-              />
+              {/* the scene lives inside the character's own box */}
+              <Backdrop id={state.equippedBackdrop} className="rlxp-portrait-backdrop" />
+              {heroWeapon ? (
+                <WeaponSprite
+                  weaponId={heroWeapon}
+                  spriteId={state.character.spriteId || "human"}
+                  scale={3}
+                  reducedMotion={reducedMotion}
+                />
+              ) : (
+                <Sprite
+                  id={state.character.spriteId || "human"}
+                  anim={heroAnim}
+                  scale={3}
+                  reducedMotion={reducedMotion}
+                />
+              )}
             </button>
           )}
+
           <button
             className="rlxp-purse"
             aria-label="Open merchant"
@@ -4840,6 +4695,7 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
             <Glyph name="coins" size={16} />
             <span>{fmt(state.coins || 0)}</span>
           </button>
+
           <LevelDisplay
             level={currentLevel}
             displayName={state.settings.displayName}
@@ -4847,7 +4703,9 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
             levelStyleTier={tierOfItemId(equipped.levelStyle)}
           />
         </div>
-        <XPBar totalXp={state.totalXp} level={currentLevel} riskXp={currentRisk} frameTier={tierOfItemId(equipped.barFrame)} />
+        <div className={barPulse ? "rlxp-xpbar-gain" : ""}>
+          <XPBar totalXp={state.totalXp} level={currentLevel} riskXp={currentRisk} frameTier={tierOfItemId(equipped.barFrame)} />
+        </div>
         <div className="rlxp-floater-wrap" aria-hidden="true">
           {coinFloaters.map((f, i) => (
             <span key={f.id} className="rlxp-coin-floater" style={{ left: `${6 + (i % 3) * 52}px` }}>
@@ -4860,14 +4718,17 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
             </span>
           ))}
         </div>
-        <DailyProgress earned={state.todayEarned} target={state.todayTarget} />
-        <DecayRisk
+        <DailyWarning
+          earned={state.todayEarned}
+          target={state.todayTarget}
           riskXp={currentRisk}
           targetMet={targetMet}
           tokenActive={state.restTokenActiveToday}
           easyMode={!!state.settings.easyMode}
+          restTokens={state.restTokens || 0}
+          onUseToken={handleUseRestToken}
         />
-        <BossPanel boss={state.weeklyBoss} reducedMotion={reducedMotion} lastHit={bossHit} />
+        <BossPanel boss={state.weeklyBoss} state={state} reducedMotion={reducedMotion} lastHit={bossHit} attacking={attacking} />
         <DailyTaskBoard state={state} />
         <ActiveQuest quest={state.activeQuest} progress={questProgress(state.activeQuest, state)} />
       </Panel>
@@ -4925,7 +4786,9 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
         <CharacterPanel
           state={state}
           onChooseCharacter={handleChooseCharacter}
-          onEquipGear={handleEquipGear}
+          onBuyCharacter={handleBuyCharacter}
+          onEquipFlourish={handleEquipFlourish}
+          onEquipWeapon={handleEquipWeapon}
           onClose={() => setShowCharacter(false)}
         />
       )}
@@ -4978,10 +4841,37 @@ export default function RealLifeXP({ storageOk = true, user = null }) {
         <RandomEventModal event={randomEvent} onClose={() => setRandomEvent(null)} />
       )}
 
+      {battleHit && state.weeklyBoss && (
+        <BattleModal
+          boss={state.weeklyBoss}
+          state={state}
+          damage={battleHit.amount}
+          reducedMotion={reducedMotion}
+          onClose={() => {
+            setBattleHit(null);
+            pendingBattleRef.current = false;
+            const pend = pendingXpRef.current;
+            if (pend) {
+              pendingXpRef.current = null;
+              showXpGain(pend.id, pend.amount);
+            }
+          }}
+        />
+      )}
+
       {showShop && (
         <ChestShop
+          state={state}
           coins={state.coins || 0}
           onBuy={handleBuyChest}
+          onBuyCharacter={handleBuyCharacter}
+          onBuyFlourish={handleBuyFlourish}
+          onEquipFlourish={handleEquipFlourish}
+          onWearCharacter={(cid) => handleChooseCharacter({ spriteId: cid })}
+          onBuyWeapon={handleBuyWeapon}
+          onEquipWeapon={handleEquipWeapon}
+          onBuyBackdrop={handleBuyBackdrop}
+          onEquipBackdrop={handleEquipBackdrop}
           onClose={() => setShowShop(false)}
         />
       )}
@@ -5050,7 +4940,7 @@ const CSS = `
   max-width: 460px;
   display: flex;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
   margin-bottom: 10px;
 }
 
@@ -5061,7 +4951,7 @@ const CSS = `
   border: 1px solid var(--border);
   border-radius: 10px;
   color: var(--gold);
-  padding: 8px 2px 6px;
+  padding: 8px 1px 6px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -5078,7 +4968,7 @@ const CSS = `
 .rlxp-icon-btn-label {
   font-family: 'Spectral', Georgia, 'Times New Roman', serif;
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 12px;
   letter-spacing: 0.05em;
   color: var(--text-muted);
   text-shadow: 0 1px 0 rgba(0,0,0,0.75);
@@ -5088,6 +4978,12 @@ const CSS = `
 .rlxp-icon-btn:active { transform: translateY(1px); }
 .rlxp-icon-btn:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 2px; }
 .rlxp-glyph { display: inline-block; vertical-align: -0.15em; }
+/* pixel icons must never be smoothed or scaled by fractions */
+.rlxp-icon {
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+  vertical-align: -0.2em;
+}
 
 .rlxp-panel {
   background:
@@ -5127,28 +5023,10 @@ const CSS = `
   color: var(--text-dim);
 }
 
-.rlxp-hero-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.rlxp-hero-portrait {
-  flex: none;
-  width: 84px;
-  height: 104px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background:
-    radial-gradient(ellipse at 50% 25%, rgba(212,175,55,0.14), transparent 65%),
-    linear-gradient(180deg, #17110a, #0e0b07);
-  box-shadow: inset 0 2px 8px rgba(0,0,0,0.6);
-  overflow: hidden;
-  cursor: pointer;
-}
-.rlxp-hero-portrait:active { transform: scale(0.97); }
-.rlxp-hero-portrait .rlxp-char-canvas { width: 100%; height: 100%; }
+
+
+
+
 
 .rlxp-level-block { text-align: left; }
 .rlxp-level-row { display: flex; align-items: baseline; gap: 10px; margin-top: 2px; }
@@ -5195,7 +5073,8 @@ const CSS = `
   top: 0; left: 0; bottom: 0;
   background: linear-gradient(180deg, var(--green-bright), var(--green));
   box-shadow: 0 0 10px rgba(123,199,102,0.45);
-  transition: width 0.4s ease;
+  /* slow enough to watch it climb, not so slow it feels sluggish */
+  transition: width 0.8s cubic-bezier(0.2, 0.8, 0.3, 1), box-shadow 0.3s ease, filter 0.3s ease;
 }
 .rlxp-xpbar-fill-red {
   position: absolute;
@@ -6692,6 +6571,384 @@ const CSS = `
   pointer-events: none;
 }
 
+.rlxp-chest-glyph-stage {
+  transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.64, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 190px;
+}
+
+.rlxp-sprite-stack { position: relative; }
+
+.rlxp-scene-preview {
+  /* the hero stands on the floor of the scene, not floating in the middle */
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 10px;
+}
+
+/* ---- the daily warning ----
+   Escalates through the day: quiet early, red and pulsing when the clock is
+   nearly out. This is the honest core of the app, so it should feel like a
+   real deadline — while keeping the way out visible at all times. */
+.rlxp-warning {
+  padding: 11px 13px 12px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.25));
+  transition: border-color 0.4s ease, background 0.4s ease, box-shadow 0.4s ease;
+  margin-bottom: 12px;
+}
+.rlxp-warning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.rlxp-warning-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.8);
+}
+.rlxp-warning-clock {
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.rlxp-warning-track {
+  position: relative;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #120c08, #080504);
+  border: 1px solid rgba(0,0,0,0.7);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,0.85);
+  overflow: hidden;
+}
+.rlxp-warning-fill {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.8s cubic-bezier(0.2,0.8,0.3,1), background 0.4s ease;
+}
+.rlxp-warning-amount {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: #fff0dc;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.95);
+  pointer-events: none;
+}
+.rlxp-warning-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 9px;
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.rlxp-warning-penalty strong { color: var(--red-bright); }
+.rlxp-warning-token {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #241d13, #17130c);
+  color: var(--text-muted);
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* --- calm: the day is young --- */
+.rlxp-warning-calm .rlxp-warning-fill { background: linear-gradient(180deg, #b8912b, #8a6d22); }
+
+/* --- urgent: afternoon, still short --- */
+.rlxp-warning-urgent {
+  border-color: rgba(200,110,40,0.55);
+  background: linear-gradient(180deg, rgba(200,110,40,0.10), rgba(0,0,0,0.28));
+}
+.rlxp-warning-urgent .rlxp-warning-fill { background: linear-gradient(180deg, #e07a3a, #a8501f); }
+.rlxp-warning-urgent .rlxp-warning-clock { color: #f0a05a; }
+
+/* --- critical: under two hours. This is the state that should get you off
+       the sofa, so it pulses rather than sitting still. --- */
+.rlxp-warning-critical {
+  border-color: rgba(226,73,63,0.75);
+  background: linear-gradient(180deg, rgba(190,40,30,0.18), rgba(0,0,0,0.3));
+  animation: rlxp-warn-pulse 2s ease-in-out infinite;
+}
+.rlxp-warning-critical .rlxp-warning-fill { background: linear-gradient(180deg, #e2493f, #8e2419); }
+.rlxp-warning-critical .rlxp-warning-clock {
+  color: #ff8a7a;
+  text-shadow: 0 0 12px rgba(255,90,70,0.6);
+}
+.rlxp-warning-critical .rlxp-warning-title { color: #ffb9ac; }
+@keyframes rlxp-warn-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(226,73,63,0); }
+  50%      { box-shadow: 0 0 22px rgba(226,73,63,0.35); }
+}
+
+/* --- safe: done for the day, everything calms --- */
+.rlxp-warning-safe {
+  border-color: rgba(123,199,102,0.5);
+  background: linear-gradient(180deg, rgba(123,199,102,0.10), rgba(0,0,0,0.22));
+}
+.rlxp-warning-safe .rlxp-warning-fill { background: linear-gradient(180deg, #7bc766, #4a8f3c); }
+.rlxp-warning-safe .rlxp-warning-title { color: #b6e5a6; }
+
+.rlxp-reduced-motion .rlxp-warning-critical { animation: none; }
+
+/* ---- hero row ----
+   The character sits in its own framed box beside the level, and the equipped
+   scene fills that box — so the hero is standing somewhere, and it's obvious
+   the box itself is a thing you can press. */
+.rlxp-hero-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 6px;
+}
+.rlxp-hero-portrait {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 92px;
+  height: 108px;
+  padding: 0 0 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background-color: #0e0b07;
+  box-shadow:
+    inset 0 2px 10px rgba(0,0,0,0.7),
+    0 0 0 1px rgba(212,175,55,0.12);
+  overflow: hidden;
+  cursor: pointer;
+}
+.rlxp-hero-portrait:active { transform: translateY(1px); filter: brightness(1.15); }
+.rlxp-hero-portrait .rlxp-sprite,
+.rlxp-hero-portrait .rlxp-sprite-stack { position: relative; z-index: 1; }
+
+/* ---- backdrops ----
+   The scene sits behind everything and is pinned to the bottom, so the floor
+   always meets the bottom edge and a character standing on it reads as being
+   in the room rather than floating over a picture. */
+.rlxp-backdrop { position: relative; }
+.rlxp-portrait-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+}
+
+.rlxp-hero-portrait .rlxp-sprite,
+.rlxp-hero-portrait .rlxp-sprite-stack { position: relative; z-index: 1; }
+
+/* ---- shop previews ----
+   Everything animates in the shop before you buy it. You should be able to
+   see exactly what you're spending gold on. */
+.rlxp-shop-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px;
+}
+.rlxp-preview-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  text-align: center;
+}
+.rlxp-preview-card-on {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px rgba(212,175,55,0.3), inset 0 0 16px rgba(212,175,55,0.1);
+}
+.rlxp-preview-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 128px;
+  border-radius: 9px;
+  background-color: #070504;
+  background-image:
+    radial-gradient(ellipse at 50% 75%, rgba(212,175,55,0.10), transparent 65%);
+  overflow: hidden;
+}
+/* a scene preview supplies its own image, so it must not keep the glow */
+.rlxp-scene-preview { background-image: none; }
+
+/* an effect sits ON the character, centred and overflowing outward */
+.rlxp-effect-stack {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rlxp-effect-stack .rlxp-effect {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.rlxp-preview-locked { filter: brightness(0.32) grayscale(0.7); }
+.rlxp-preview-name {
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 15.5px;
+  color: var(--text);
+}
+.rlxp-preview-blurb {
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--text-dim);
+  min-height: 34px;
+  line-height: 1.35;
+}
+.rlxp-preview-note {
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 12.5px;
+  color: #d8a24a;
+}
+.rlxp-preview-btn {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 4px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #241d13, #17130c);
+  color: var(--text-muted);
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 14px;
+  cursor: pointer;
+}
+.rlxp-preview-btn:disabled { opacity: 0.6; cursor: default; }
+.rlxp-preview-buy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-color: #8a6d22;
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  color: #241a06;
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 800;
+}
+.rlxp-preview-buy:disabled {
+  background: linear-gradient(180deg, #3a3126, #2a2419);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+/* ---- hero roster ---- */
+.rlxp-char-sprite-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px 0 6px;
+}
+.rlxp-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.rlxp-hero-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  text-align: center;
+}
+.rlxp-hero-card-on {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px rgba(212,175,55,0.35), inset 0 0 18px rgba(212,175,55,0.10);
+}
+/* Locked heroes are shown, not hidden — you can't want what you can't see. */
+.rlxp-hero-card-locked .rlxp-hero-card-art { filter: brightness(0.32) grayscale(0.7); }
+.rlxp-hero-card-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96px;
+}
+.rlxp-hero-card-name {
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 15.5px;
+  color: var(--text);
+}
+.rlxp-hero-card-blurb {
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--text-dim);
+  min-height: 34px;
+}
+.rlxp-hero-card-btn {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 4px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #241d13, #17130c);
+  color: var(--text-muted);
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 14px;
+  cursor: pointer;
+}
+.rlxp-hero-card-btn:disabled { opacity: 0.65; cursor: default; }
+.rlxp-hero-card-buy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-color: #8a6d22;
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  color: #241a06;
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 800;
+}
+.rlxp-hero-card-buy:disabled {
+  background: linear-gradient(180deg, #3a3126, #2a2419);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+
 /* ---- pixel sprites ----
    The art is 8x8-ish drawn inside a 32x32 frame, so it must never be
    smoothed or scaled by fractions or it turns to mush. */
@@ -6701,13 +6958,122 @@ const CSS = `
   image-rendering: crisp-edges;
   -ms-interpolation-mode: nearest-neighbor;
 }
-.rlxp-boss-sprite {
-  height: 150px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
+
 .rlxp-hero-portrait .rlxp-sprite { margin: 0 auto; }
+
+/* ---- xp gain ----
+   The bar grows and glows, and the number floats off it. Deliberately after
+   the boss popup, so the reward isn't happening behind something. */
+.rlxp-xpbar-gain .rlxp-xpbar-fill-green {
+  box-shadow:
+    0 0 16px rgba(123,199,102,0.85),
+    inset 0 1px 0 rgba(255,255,255,0.4);
+  filter: brightness(1.25);
+}
+.rlxp-xpbar-gain { animation: rlxp-bar-swell 0.9s ease-out; }
+@keyframes rlxp-bar-swell {
+  0%   { transform: scaleY(1); }
+  22%  { transform: scaleY(1.14); }
+  100% { transform: scaleY(1); }
+}
+
+/* ---- battle popup ---- */
+.rlxp-battle-overlay { align-items: center; }
+.rlxp-battle-stage {
+  width: min(400px, 92vw);
+  padding: 18px 16px 14px;
+  border: 1px solid rgba(212,175,55,0.55);
+  border-radius: 14px;
+  background:
+    radial-gradient(ellipse at 50% 20%, rgba(190,60,35,0.20), transparent 65%),
+    linear-gradient(180deg, #1b1009, #0b0705);
+  box-shadow: 0 18px 50px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,170,120,0.12);
+}
+.rlxp-battle-title {
+  text-align: center;
+  margin-bottom: 10px;
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 17px;
+  color: var(--gold-bright);
+  text-shadow: 0 2px 0 rgba(0,0,0,0.9), 0 0 16px rgba(242,215,128,0.35);
+}
+.rlxp-battle-big { height: 190px; }
+.rlxp-battle-track { margin-top: 12px; }
+.rlxp-battle-foot {
+  margin-top: 9px;
+  text-align: center;
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+/* ---- the duel ----
+   You on the left, it on the right. Logging a workout is your turn, and you
+   see the hit land rather than just watching a number change. */
+.rlxp-battle {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  height: 150px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background-color: #0b0705;
+  overflow: hidden;
+}
+/* A vignette laid OVER the scene rather than replacing it. Using the
+   background shorthand here silently wiped the backdrop image. */
+.rlxp-battle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 50% 95%, rgba(190,60,35,0.18), transparent 62%),
+    linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.10) 40%, rgba(0,0,0,0.30));
+}
+.rlxp-battle > * { position: relative; z-index: 1; }
+.rlxp-battle-hero, .rlxp-battle-boss {
+  flex: none;
+  transition: transform 0.22s cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+/* A slight lean toward each other reads as a stand-off while keeping both
+   faces visible — the side-on art has no eyes to show. */
+.rlxp-battle-hero { transform: rotate(2deg); }
+.rlxp-battle-boss { transform: rotate(-2deg); }
+.rlxp-battle-lunge { transform: translateX(18px) rotate(4deg) scale(1.04); }
+.rlxp-battle-recoil { transform: translateX(10px) rotate(-7deg); filter: brightness(1.9) saturate(0.4); }
+/* the lunge: step in on the swing, then back */
+.rlxp-battle-lunge { transform: translateX(16px); }
+.rlxp-battle-recoil { transform: translateX(9px); filter: brightness(1.9) saturate(0.4); }
+.rlxp-battle-dead { opacity: 0.35; filter: grayscale(0.8); }
+
+.rlxp-battle-gap {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+}
+.rlxp-battle-hit {
+  position: absolute;
+  top: 26px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 800;
+  font-size: 26px;
+  color: #ff6f5e;
+  text-shadow: 0 0 16px rgba(255,90,70,0.8), 0 2px 0 rgba(0,0,0,0.9);
+  pointer-events: none;
+  white-space: nowrap;
+  animation: rlxp-battle-hit-fly 1.3s ease-out forwards;
+}
+@keyframes rlxp-battle-hit-fly {
+  0%   { opacity: 0; transform: translateX(-90%) translateY(10px) scale(0.7); }
+  20%  { opacity: 1; transform: translateX(-60%) translateY(0) scale(1.15); }
+  35%  { transform: translateX(-50%) scale(1); }
+  100% { opacity: 0; transform: translateX(-10%) translateY(-28px) scale(0.95); }
+}
 
 /* ---- weekly boss panel ---- */
 .rlxp-boss-panel {
@@ -6746,29 +7112,9 @@ const CSS = `
   text-shadow: 0 1px 0 #000, 0 0 14px rgba(242,215,128,0.45);
   white-space: nowrap;
 }
-.rlxp-boss-stage {
-  position: relative;
-  height: 150px;
-  border-radius: 10px;
-  background:
-    radial-gradient(ellipse at 50% 82%, rgba(190,60,35,0.20), transparent 60%),
-    linear-gradient(180deg, rgba(0,0,0,0.10), rgba(0,0,0,0.42));
-  overflow: hidden;
-}
+
 .rlxp-boss-canvas { width: 100%; display: block; }
-.rlxp-boss-hit {
-  position: absolute;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
-  font-weight: 800;
-  font-size: 26px;
-  color: #ff6f5e;
-  text-shadow: 0 0 16px rgba(255,90,70,0.75), 0 2px 0 rgba(0,0,0,0.85);
-  pointer-events: none;
-  animation: rlxp-boss-hit-rise 1.4s ease-out forwards;
-}
+
 @keyframes rlxp-boss-hit-rise {
   0%   { opacity: 0; transform: translateX(-50%) translateY(14px) scale(0.7); }
   18%  { opacity: 1; transform: translateX(-50%) translateY(0) scale(1.12); }
@@ -6822,6 +7168,60 @@ const CSS = `
   font-size: 12.5px;
   color: var(--text-muted);
   text-shadow: 0 1px 0 rgba(0,0,0,0.7);
+}
+
+/* ---- active quest ---- */
+.rlxp-quest-strip {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(212,175,55,0.06), rgba(0,0,0,0.18));
+  padding: 10px 12px;
+}
+.rlxp-quest-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+}
+.rlxp-quest-icon { flex: none; color: var(--gold); line-height: 0; }
+.rlxp-quest-title {
+  flex: 1;
+  min-width: 0;
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 14px;
+  color: var(--text);
+}
+.rlxp-quest-reward {
+  flex: none;
+  font-family: 'Cinzel', Georgia, 'Times New Roman', serif;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.rlxp-quest-track {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #150f0a, #0a0705);
+  border: 1px solid rgba(0,0,0,0.6);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,0.8);
+  overflow: hidden;
+}
+.rlxp-quest-fill {
+  height: 100%;
+  border-radius: 6px;
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.35);
+  transition: width 0.7s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.rlxp-quest-fill-done { background: linear-gradient(180deg, var(--green-bright), var(--green)); }
+.rlxp-quest-progress {
+  margin-top: 6px;
+  text-align: right;
+  font-family: 'Spectral', Georgia, 'Times New Roman', serif;
+  font-size: 12.5px;
+  color: var(--text-dim);
 }
 
 /* ---- daily task board ---- */
@@ -7208,4 +7608,33 @@ const CSS = `
 .rlxp-reduced-motion .rlxp-chest-slot:active {
   transform: none;
 }
+
+/* =======================================================================
+   PIXEL FRAMES
+
+   Real Minifantasy borders wrapped around the app's own panels.
+
+   Each frame is a 3x3 set of 16px tiles. border-image keeps the four corners
+   pixel-perfect and stretches only the middles, so one small PNG can frame a
+   panel of any size — which is the whole reason the pack is sliced this way.
+
+   Repeating the edge tiles rather than stretching them is what keeps the
+   pixels crisp instead of smeared.
+   ======================================================================= */
+.rlxp-framed {
+  border-style: solid;
+  border-width: 16px;
+  border-image-slice: 16 fill;
+  border-image-repeat: repeat;
+  image-rendering: pixelated;
+  background: none;
+  box-shadow: none;
+}
+.rlxp-frame-panel  { border-image-source: url(ui/frames/panel.png); }
+.rlxp-frame-sheet  { border-image-source: url(ui/frames/sheet.png); }
+.rlxp-frame-boss   { border-image-source: url(ui/frames/boss.png); }
+.rlxp-frame-card   { border-image-source: url(ui/frames/card.png); }
+.rlxp-frame-slot   { border-image-source: url(ui/frames/slot.png); }
+.rlxp-frame-banner { border-image-source: url(ui/frames/banner.png); }
+
 `;
